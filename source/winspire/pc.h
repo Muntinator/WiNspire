@@ -106,6 +106,14 @@ typedef struct {
 	uint32_t clock_hz;
 	int enable_serial;
 	int vga_force_8dm;
+	/*
+	 * [network] uplink credentials, handed to the ESP32 bridge over cxlink
+	 * (see cxlink_net_provision in cxlink.h). Either may be NULL, meaning
+	 * there is nothing to provision. The password is wiped by the frontend
+	 * before the config is freed, and is never written elsewhere.
+	 */
+	const char *wifi_ssid;
+	const char *wifi_password;
 } PCConfig;
 
 PC *pc_new(SimpleFBDrawFunc *redraw, void *redraw_data,
@@ -121,6 +129,19 @@ void pc_free_buffers(PC *pc);
 #endif
 
 void mixer_callback(void *opaque, uint8_t *stream, int free);
+
+/*
+ * One step of the PC audio path: pull one block of mixed PCM into stream and
+ * advance the ISA DMA controllers so the Sound Blaster can refill from guest
+ * memory.
+ *
+ * free is in bytes of 16-bit stereo PCM at the mixer's fixed 44100 Hz, and must
+ * not exceed PC_AUDIO_PULL_BYTES (mixer_callback asserts on it). Frontends call
+ * this from their main loop at a rate that matches elapsed guest time.
+ */
+#define PC_AUDIO_PULL_FRAMES 1024
+#define PC_AUDIO_PULL_BYTES (PC_AUDIO_PULL_FRAMES * 4)
+void pc_audio_step(PC *pc, uint8_t *stream, int free);
 
 int parse_conf_ini(void* user, const char* section,
 		   const char* name, const char* value);

@@ -25,6 +25,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include "ne2000.h"
+#if defined(USE_CXLINK)
+#include "cxlink.h"
+#endif
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdatomic.h>
@@ -686,9 +689,63 @@ void ne2000_step(NE2000State *s)
         ne2000_step_null(s);
 }
 
+#if defined(USE_CXLINK)
+/*
+ * cxlink backend: the master of the emulated NE2000 is an ESP32 hanging off the
+ * calculator's dock connector. The guest-facing card is unchanged - Windows 95
+ * still loads its NE2000 driver and never learns where the frames go. See
+ * cxlink.h and NETWORK_ARCHITECTURE.md.
+ *
+ * Both directions are non-blocking. Transmits that cannot be queued are dropped
+ * (which is exactly what a real NE2000 does under congestion), and receives are
+ * drained in bounded batches per step so the ESP32 can never stall the CPU.
+ */
+struct CXLINKVC {
+    VC header;
+};
+
+#define CXLINK_RX_BATCH 8
+
+static void qemu_send_packet_cxlink(void *vc, uint8_t *buf, int size)
+{
+    (void)vc;
+    if (size <= 0)
+        return;
+    (void)cxlink_net_send_frame(buf, (size_t)size);
+}
+
+static void ne2000_step_cxlink(NE2000State *s)
+{
+    uint8_t buf[1536];
+    int batch = 0;
+
+    while (batch++ < CXLINK_RX_BATCH && ne2000_can_receive(s)) {
+        int length = cxlink_net_poll_frame(buf, sizeof(buf));
+        if (length <= 0)
+            break;
+        ne2000_receive(s, buf, length);
+    }
+}
+
+static void *net_open_cxlink(NE2000State *s)
+{
+    static struct CXLINKVC vc;
+
+    (void)s;
+    vc.header.send_packet = qemu_send_packet_cxlink;
+    vc.header.step = ne2000_step_cxlink;
+    return &vc;
+}
+#endif /* USE_CXLINK */
+
 static void *net_open(NE2000State *s)
 {
     VC *vc = NULL;
+#if defined(USE_CXLINK)
+    vc = net_open_cxlink(s);
+    if (vc)
+        return vc;
+#endif
 #if defined(USE_TUNTAP)
     vc = net_open_tuntap(s);
     if (vc) {

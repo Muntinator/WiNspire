@@ -1026,6 +1026,12 @@ void mixer_callback (void *opaque, uint8_t *stream, int free)
 	uint8_t tmpbuf[MIXER_BUF_LEN];
 	PC *pc = opaque;
 	assert(free / 2 <= MIXER_BUF_LEN);
+	/*
+	 * Clear the destination first: sb16_audio_callback() returns without
+	 * writing anything when the card is idle, so the mix below would
+	 * otherwise accumulate on top of uninitialised bytes.
+	 */
+	memset(stream, 0, free);
 	memset(tmpbuf, 0, MIXER_BUF_LEN);
 	adlib_callback(pc->adlib, tmpbuf, free / 2); // s16, mono
 	sb16_audio_callback(pc->sb16, stream, free); // s16, stereo
@@ -1051,6 +1057,32 @@ void mixer_callback (void *opaque, uint8_t *stream, int free)
 		}
 	}
 #endif
+}
+
+/*
+ * The native (calculator) build compiles the ISA DMA step out of pc_step() for
+ * speed, which leaves the Sound Blaster's buffer unable to refill: nothing else
+ * calls i8257_dma_run(). This is the entry point that restores the audio loop.
+ *
+ * Ordering matters. sb16_audio_callback() publishes s->audio_free (how many
+ * bytes it drained) and the subsequent DMA refill is bounded by it, so the
+ * mixer pull must come first.
+ */
+void pc_audio_step(PC *pc, uint8_t *stream, int free)
+{
+	if (!pc || !stream || free <= 0)
+		return;
+	if (free > PC_AUDIO_PULL_BYTES)
+		free = PC_AUDIO_PULL_BYTES;
+	mixer_callback(pc, stream, free);
+	/*
+	 * LEAN_DEVICES builds (and any future configuration without a Sound
+	 * Blaster) leave these NULL, and i8257_dma_run() does not check.
+	 */
+	if (pc->isa_dma)
+		i8257_dma_run(pc->isa_dma);
+	if (pc->isa_hdma)
+		i8257_dma_run(pc->isa_hdma);
 }
 
 void load_bios_and_reset(PC *pc)
@@ -1167,6 +1199,23 @@ int parse_conf_ini(void* user, const char* section,
 			conf->fpu = atoi(value);
 		} else if (NAME("clock_hz")) {
 			conf->clock_hz = (uint32_t)strtoul(value, NULL, 0);
+		}
+	} else if (SEC("network")) {
+		/*
+		 * Uplink credentials for the ESP32 bridge, which has no console of
+		 * its own and takes them over the cxlink link (see cxlink.h). This
+		 * INI is the one file the user owns on the calculator, so it is
+		 * where they go; nothing writes them anywhere else and nothing
+		 * prints the password back.
+		 *
+		 * Both are optional. An ssid with no password is an open network;
+		 * a password with no ssid is rejected by the frontend rather than
+		 * silently ignored.
+		 */
+		if (NAME("ssid")) {
+			conf->wifi_ssid = strdup(value);
+		} else if (NAME("password")) {
+			conf->wifi_password = strdup(value);
 		}
 	}
 #undef SEC

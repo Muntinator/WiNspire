@@ -2,6 +2,13 @@
 /build/
 /server/
 
+# ESP-IDF: a plain `idf.py build` in place would otherwise drop build output and
+# a config backup into the source tree (source/esp32/build.sh uses build/esp32).
+# sdkconfig itself is deliberately tracked: it pins the target, flash size and
+# partition layout the firmware was verified with.
+source/esp32/build/
+sdkconfig.old
+
 # Local disk images and logs
 *.img
 *.iso

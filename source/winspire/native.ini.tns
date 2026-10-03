@@ -14,3 +14,18 @@ height = 240
 gen = 4
 fpu = 0
 clock_hz = 4770000
+
+; Uplink credentials for the optional ESP32 bridge (NETWORK_ARCHITECTURE.md 6.3).
+; The bridge has no console, so they are read here and sent over the dock link.
+; Nothing else reads them, nothing writes them anywhere else, and the password is
+; never printed.
+;
+;   ssid      1-31 characters
+;   password  8-63 characters, or empty/absent for an open network
+;
+; Values are taken literally: do not quote them, and keep a space before any
+; trailing ';' or '#' comment. Comment both lines out to run with no Wi-Fi.
+;
+;[network]
+;ssid = MyHomeNetwork
+;password = correcthorsebatterystaple

@@ -7,11 +7,14 @@
 #include <time.h>
 
 #include "pc.h"
+#include "cxlink.h"
 
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
 #define FRAMEBUFFER_BYTES \
 	(SCREEN_WIDTH * SCREEN_HEIGHT * 2)
+/* The rotated panel buffer holds the transposed guest surface. */
+#define ROTATE_BUFFER_BYTES (FRAMEBUFFER_BYTES)
 #ifndef TINY386_INPUT_POLL_LOOPS
 /* Keep the proven sampling interval for the touchpad deadzone. */
 #define TINY386_INPUT_POLL_LOOPS 2U
@@ -53,8 +56,89 @@
 #define VGA_RAM_MIN (64L * 1024)
 #define VGA_RAM_MAX (1024L * 1024)
 
+/*
+ * Hardware profile.
+ *
+ * The original TI-Nspire CX and the CX II share the same ARM926EJ-S core and
+ * the same 320x240-shaped guest surface, but differ in ways that the frontend
+ * must not paper over:
+ *
+ *   - Panel orientation. CX units from hardware revision W and later, and all
+ *     CX II units, mount the panel rotated, so lcd_type() reports
+ *     SCR_240x320_565 instead of SCR_320x240_565. The guest still renders
+ *     320x240, so the frontend rotates during the blit.
+ *   - Hardware cursor. Only the CX II LCD controller exposes the cursor
+ *     enable bit at 0xC0000C00. That address is not part of the Ndless API and
+ *     must not be written on the original CX.
+ *   - Core clock. The original CX responds to Ndless set_cpu_speed(); the CX II
+ *     returns 0 for every CPU_SPEED_* value and is clocked through the PMU
+ *     instead.
+ *
+ * The grayscale Clickpad/Touchpad hardware (PL110, 4bpp) is out of scope: its
+ * panel cannot show the 16bpp guest surface.
+ */
+typedef struct {
+	bool valid;
+	bool cx2;             /* named cx2, not is_cx2, to avoid the libndls macro */
+	bool rotated_panel;   /* panel is 240x320, guest surface must be rotated */
+	bool has_hw_cursor;   /* CX II LCD controller cursor register exists */
+	bool can_set_cpu_speed;
+	uint16_t panel_width;
+	uint16_t panel_height;
+	scr_type_t panel_format;
+} NspireHardware;
+
+static NspireHardware hw;
+
+/* Filled with a user-facing message when an early check fails. */
+static char boot_error[256];
+
+/*
+ * Probe the running hardware. Returns false (with boot_error set) when the
+ * panel cannot display the emulator's 16bpp output.
+ */
+static bool detect_hardware(void)
+{
+	scr_type_t format;
+
+	memset(&hw, 0, sizeof(hw));
+	if (is_classic) {
+		snprintf(boot_error, sizeof(boot_error),
+			 "This build needs a color TI-Nspire CX.\n"
+			 "Grayscale Clickpad/Touchpad (PL110, 4bpp) is not supported.");
+		return false;
+	}
+	hw.cx2 = is_cx2;
+	hw.has_hw_cursor = is_cx2;
+	/* set_cpu_speed() is a no-op on CX II; see its libndls implementation. */
+	hw.can_set_cpu_speed = !is_cx2;
+	format = lcd_type();
+	switch (format) {
+	case SCR_320x240_565:
+		hw.panel_width = SCREEN_WIDTH;
+		hw.panel_height = SCREEN_HEIGHT;
+		hw.rotated_panel = false;
+		break;
+	case SCR_240x320_565:
+		hw.panel_width = SCREEN_HEIGHT;
+		hw.panel_height = SCREEN_WIDTH;
+		hw.rotated_panel = true;
+		break;
+	default:
+		snprintf(boot_error, sizeof(boot_error),
+			 "Unsupported LCD layout (scr_type %d).\n"
+			 "This build supports the 16bpp panels of the TI-Nspire CX "
+			 "(320x240 and 240x320) and CX II.", (int)format);
+		return false;
+	}
+	hw.panel_format = format;
+	hw.valid = true;
+	return true;
+}
+
 typedef struct {
 	u8 *framebuffer;
+	uint16_t *rotate_buffer; /* only allocated for a rotated panel */
 	bool ready;
 	bool lcd_active;
 	bool dirty;
@@ -66,6 +150,13 @@ typedef struct {
 	uint64_t last_claim_ms;
 	uint64_t last_draw_ms;
 } Display;
+
+/*
+ * Present the guest surface through lcd_blit(), rotating when the panel is
+ * mounted the other way up. Defined below with the rotation helper. The
+ * forward declaration keeps the redraw path readable.
+ */
+static void panel_blit(Display *display);
 
 typedef struct {
 	const t_key *key;
@@ -214,6 +305,167 @@ static void advance_guest_timer(PC *pc)
 	guest_ticks += (uint32_t)elapsed;
 }
 
+/* ------------------------------------------------------------------ */
+/* CX <-> ESP32 I/O bridge service                                     */
+/* ------------------------------------------------------------------ */
+/*
+ * Two jobs, both driven from the main loop rather than from inside the guest
+ * interpreter:
+ *
+ *   - cxlink_poll() moves frames in and out of the dock UART (or does nothing
+ *     when the build has no transport).
+ *   - the audio path pulls a block out of the PC's shared mixer, converts it
+ *     to what the link negotiated, and hands it to the bridge for the ESP32 to
+ *     play.
+ *
+ * The audio pull is NOT optional when no ESP32 is attached. On this target
+ * pc.c compiles the ISA DMA step out of pc_step() for speed, so the Sound
+ * Blaster's buffer can only refill from here (see pc_audio_step()); skipping
+ * the pull because the link is down would leave a guest audio driver waiting
+ * forever for the interrupt that a completed DMA block is supposed to raise.
+ *
+ * Both are paced against guest time rather than loop iterations, because one
+ * batch can be tens of milliseconds of guest time depending on
+ * TINY386_PC_STEP_COUNT in cx_profiles.h.
+ */
+#define BRIDGE_POLL_US 1000U
+/* The rate sb16.c and adlib.c mix at. Not configurable in this tree. */
+#define AUDIO_MIXER_HZ 44100U
+/* Most mixer blocks to pull in one call; a longer backlog is dropped. */
+#define AUDIO_MAX_BLOCKS_PER_CALL 16U
+/* Never try to catch up more than this after a long stall. */
+#define AUDIO_CATCHUP_LIMIT_FRAMES (AUDIO_MIXER_HZ / 4U)
+
+static uint32_t bridge_last_us;
+/* Fractional mixer-frame remainder, in units of 1/AUDIO_MIXER_HZ frame. */
+static uint64_t audio_frame_accum;
+/* Resampling and block buffering for the link; see cxlink.h. */
+static CxlinkAudioResampler audio_resampler;
+static uint32_t audio_frames_dropped;
+static uint32_t audio_samples_sent;
+/*
+ * int16_t rather than uint8_t so the buffer is guaranteed 2-byte aligned:
+ * mixer_callback() and sb16_audio_callback() both read it as a stereo sample
+ * array, and the ARM926 faults on an unaligned halfword access.
+ */
+static int16_t mixer_buffer[PC_AUDIO_PULL_BYTES / 2];
+
+/*
+ * Uplink provisioning, driven from the config file and pushed to the bridge
+ * once the link is up. `provision_done` keeps the hand-off to one call: from
+ * then on cxlink retransmits the credentials itself until the bridge confirms
+ * them, and re-sends them by itself if the bridge is restarted, so the frontend
+ * never has to poll for it.
+ */
+static bool provision_done;
+static bool provision_note_valid;
+static char provision_note[128];
+/* The config asked for an uplink, whether or not a bridge ever answered. */
+static bool uplink_configured;
+/* Set by main() before the loop: the bridge needs the [network] section. */
+static const PCConfig *bridge_config;
+
+/*
+ * Called once the bridge is answering. Returns false when there is nothing to
+ * do (no SSID configured); the result of a failed check is reported at exit in
+ * provision_note, because a message box here would sit on top of the emulator.
+ */
+static bool provision_uplink(const PCConfig *config)
+{
+	CxlinkWifiResult result;
+
+	if (!config->wifi_ssid || !config->wifi_ssid[0])
+		return false;
+	result = cxlink_net_provision(config->wifi_ssid, config->wifi_password);
+	provision_note_valid = true;
+	if (result == CXLINK_WIFI_OK) {
+		/*
+		 * The SSID is not a secret and naming it is how a user sees that the
+		 * right network was configured. The password is never in here.
+		 */
+		snprintf(provision_note, sizeof(provision_note),
+			 "Wi-Fi: SSID \"%s\" sent to the ESP32.",
+			 config->wifi_ssid);
+	} else {
+		snprintf(provision_note, sizeof(provision_note),
+			 "Wi-Fi: [network] entry was not sent - %s.",
+			 cxlink_wifi_result_text(result));
+	}
+	return result == CXLINK_WIFI_OK;
+}
+
+static void io_bridge_reset(void)
+{
+	bridge_last_us = get_uticks();
+	audio_frame_accum = 0;
+	audio_frames_dropped = 0;
+	audio_samples_sent = 0;
+	cxlink_audio_resampler_init(&audio_resampler);
+}
+
+/*
+ * Service the Sound Blaster and forward one mixer block.
+ *
+ * pc_audio_step() always runs, even with no link: see the note above on why the
+ * DMA refill cannot be skipped. Conversion and framing only happen when there
+ * is somewhere to send the samples.
+ */
+static void io_bridge_audio_block(PC *pc, uint32_t frames)
+{
+	pc_audio_step(pc, (uint8_t *)mixer_buffer, (int)(frames * 4u));
+	if (!cxlink_link_up())
+		return;
+	audio_samples_sent += cxlink_audio_resampler_feed(&audio_resampler,
+							  mixer_buffer, frames, false);
+}
+
+static void service_io_bridge(PC *pc)
+{
+	uint32_t now = get_uticks();
+	uint32_t elapsed = now - bridge_last_us;
+	uint32_t frames;
+	uint32_t blocks = 0;
+	uint64_t scaled;
+
+	if (elapsed < BRIDGE_POLL_US)
+		return;
+	bridge_last_us = now;
+
+	cxlink_poll();
+
+	/* Hand the uplink credentials over as soon as the bridge is talking. */
+	if (!provision_done && cxlink_link_up()) {
+		provision_done = true;
+		(void)provision_uplink(bridge_config);
+	}
+
+	/*
+	 * Fixed-point accumulation: a 1 ms poll interval is 44.1 mixer frames,
+	 * so truncating the fraction each poll would run audio ~2% slow.
+	 */
+	scaled = (uint64_t)elapsed * AUDIO_MIXER_HZ + audio_frame_accum;
+	frames = (uint32_t)(scaled / 1000000ULL);
+	audio_frame_accum = scaled % 1000000ULL;
+
+	if (frames > AUDIO_CATCHUP_LIMIT_FRAMES) {
+		/* Long stall: drop the backlog instead of compounding it. */
+		audio_frames_dropped += frames - AUDIO_CATCHUP_LIMIT_FRAMES;
+		frames = AUDIO_CATCHUP_LIMIT_FRAMES;
+	}
+
+	while (frames && blocks < AUDIO_MAX_BLOCKS_PER_CALL) {
+		uint32_t block = frames;
+
+		if (block > PC_AUDIO_PULL_FRAMES)
+			block = PC_AUDIO_PULL_FRAMES;
+		io_bridge_audio_block(pc, block);
+		frames -= block;
+		blocks++;
+	}
+	/* Anything the block cap left behind is a deliberate drop. */
+	audio_frames_dropped += frames;
+}
+
 /*
  * Reserve guest and VGA RAM before smaller allocations. bigmalloc() consumes
  * these blocks when pc_new() allocates emulator memory, avoiding Ndless heap
@@ -273,8 +525,6 @@ static void free_reserved_memory(void)
 }
 
 /* Run file checks before LCD takeover so TI-OS can display failures. */
-static char boot_error[256];
-
 static bool preflight_file(const char *label, const char *path, const char *mode,
 			   long max_size)
 {
@@ -369,11 +619,18 @@ static uint64_t host_millis(void)
 	return (uint64_t)(((unsigned long)clock() * 1000UL) / CLOCKS_PER_SEC);
 }
 
-/* main() checks for CX II before any LCD register access. */
+/*
+ * The CX II LCD controller has a hardware cursor overlay that would draw over
+ * the emulated screen. The register is not exposed by the Ndless API, so it is
+ * only touched on the hardware that has it.
+ */
 static void disable_os_cursor(void)
 {
-	volatile uint32_t *cursor_reg =
-		(volatile uint32_t *)CURSOR_REG;
+	volatile uint32_t *cursor_reg;
+
+	if (!hw.has_hw_cursor)
+		return;
+	cursor_reg = (volatile uint32_t *)CURSOR_REG;
 	*cursor_reg &= ~1U;
 }
 
@@ -414,7 +671,7 @@ static void draw_frame(Display *display, bool force)
 		return;
 	if (!claim_lcd(display, force, now, NULL))
 		return;
-	lcd_blit(display->framebuffer, SCR_320x240_565);
+	panel_blit(display);
 	display->last_draw_ms = now;
 }
 
@@ -428,6 +685,15 @@ static void draw_region(Display *display,
 
 	/* The redraw queue clips bounds before this function copies any pixels. */
 	if (width * height >= REDRAW_AREA) {
+		draw_frame(display, false);
+		return;
+	}
+	/*
+	 * A rotated panel has no linear 320-wide surface to patch in place, and
+	 * REAL_SCREEN_BASE_ADDRESS strides by the panel width. Present the whole
+	 * frame through the rotating blit instead.
+	 */
+	if (hw.rotated_panel) {
 		draw_frame(display, false);
 		return;
 	}
@@ -538,7 +804,7 @@ static void keep_lcd(Display *display)
 		if (claim_lcd(display, false, now,
 					    &reclaimed) &&
 		    reclaimed) {
-			lcd_blit(display->framebuffer, SCR_320x240_565);
+			panel_blit(display);
 			display->last_draw_ms = now;
 		}
 	}
@@ -565,19 +831,72 @@ static void redraw(void *context,
 
 static uint32_t hide_os_cursor(void)
 {
-	volatile uint32_t *cursor_reg =
-		(volatile uint32_t *)CURSOR_REG;
-	uint32_t saved_cursor = *cursor_reg;
+	volatile uint32_t *cursor_reg;
+	uint32_t saved_cursor;
 
+	if (!hw.has_hw_cursor)
+		return 0;
+	cursor_reg = (volatile uint32_t *)CURSOR_REG;
+	saved_cursor = *cursor_reg;
 	*cursor_reg = saved_cursor & ~1U;
 	return saved_cursor;
 }
 
 static void restore_os_cursor(uint32_t saved_cursor)
 {
-	volatile uint32_t *cursor_reg =
-		(volatile uint32_t *)CURSOR_REG;
+	volatile uint32_t *cursor_reg;
+
+	if (!hw.has_hw_cursor)
+		return;
+	cursor_reg = (volatile uint32_t *)CURSOR_REG;
 	*cursor_reg = saved_cursor;
+}
+
+/*
+ * Present the 320x240 guest surface through lcd_blit().
+ *
+ * A rotated panel (240x320) cannot accept the guest surface directly, so the
+ * frames are transposed once per blit. The transpose is O(pixels) with a
+ * sequential read and a column-strided write, which is the cheapest correct
+ * option without a rotating LCD controller mode.
+ *
+ * If the image appears mirrored or upside down on a particular unit, flip
+ * WINSPIRE_PANEL_ROTATE_CCW: the panel mount direction varies across hardware
+ * revisions and cannot be determined at runtime from the Ndless API.
+ */
+static void rotate_surface(const uint16_t *src, uint16_t *dst)
+{
+	int x;
+	int y;
+
+#ifdef WINSPIRE_PANEL_ROTATE_CCW
+	for (y = 0; y < SCREEN_HEIGHT; y++) {
+		for (x = 0; x < SCREEN_WIDTH; x++)
+			dst[(SCREEN_WIDTH - 1 - x) * SCREEN_HEIGHT + y] =
+				src[y * SCREEN_WIDTH + x];
+	}
+#else
+	for (y = 0; y < SCREEN_HEIGHT; y++) {
+		for (x = 0; x < SCREEN_WIDTH; x++)
+			dst[x * SCREEN_HEIGHT + (SCREEN_HEIGHT - 1 - y)] =
+				src[y * SCREEN_WIDTH + x];
+	}
+#endif
+}
+
+static void panel_blit(Display *display)
+{
+	if (!display->framebuffer)
+		return;
+	if (hw.rotated_panel) {
+		if (!display->rotate_buffer)
+			return;
+		rotate_surface((const uint16_t *)display->framebuffer,
+			       display->rotate_buffer);
+		lcd_blit(display->rotate_buffer, hw.panel_format);
+		return;
+	}
+	lcd_blit(display->framebuffer, hw.panel_format);
 }
 
 static int clamp_int(int value, int min_value, int max_value)
@@ -749,6 +1068,11 @@ static void free_config_paths(PCConfig *config)
 	free((void *)config->cmdline);
 	free((void *)config->bios);
 	free((void *)config->vga_bios);
+	free((void *)config->wifi_ssid);
+	/* Wiped, not just freed: this is the uplink password. */
+	if (config->wifi_password)
+		memset((void *)config->wifi_password, 0, strlen(config->wifi_password));
+	free((void *)config->wifi_password);
 	for (index = 0;
 	     index < sizeof(config->disks) / sizeof(config->disks[0]); index++) {
 		free((void *)config->disks[index]);
@@ -787,24 +1111,36 @@ int main(int argc, char **argv)
 	uint32_t loops = 0;
 	bool first_step_done = false;
 	uint32_t saved_cursor = 0;
-	scr_type_t screen_format;
 	int error;
+	uint32_t saved_cpu_speed = 0;
+	bool cpu_speed_changed = false;
 
 	assert_ndless_rev(2004);
 	enable_relative_paths(argv);
 	free_reserved_memory();
 	reset_input_state();
 	mode_changed = false;
-	screen_format = lcd_type();
-	if (!is_cx2) {
+	memset(&hw, 0, sizeof(hw));
+	boot_error[0] = '\0';
+	if (!detect_hardware()) {
 		refresh_osscr();
-		show_msgbox("WiNspire", "This build targets the CX II.");
+		show_msgbox("WiNspire", boot_error);
 		return 1;
 	}
-	if (screen_format != SCR_320x240_565) {
-		refresh_osscr();
-		show_msgbox("WiNspire", "Unsupported LCD layout.");
-		return 1;
+	/*
+	 * The original CX clocks its ARM926 at roughly a third of the CX II rate,
+	 * so available guest throughput is the binding constraint. Ndless exposes
+	 * the clock controller on that hardware (and returns 0 on the CX II, where
+	 * the PMU is programmed instead). Ask for the fastest supported step and
+	 * restore the previous value on exit; leaving the core overclocked after
+	 * returning to TI-OS is not acceptable.
+	 */
+	if (hw.can_set_cpu_speed) {
+		unsigned previous = set_cpu_speed(CPU_SPEED_150MHZ);
+
+		saved_cpu_speed = previous;
+		cpu_speed_changed = previous != 0 &&
+			previous != CPU_SPEED_150MHZ;
 	}
 
 	configure_defaults(&config);
@@ -858,6 +1194,28 @@ int main(int argc, char **argv)
 			 VGA_RAM_MIN / 1024L, VGA_RAM_MAX / 1024L, config_path);
 		return startup_error(&config, boot_error);
 	}
+	/*
+	 * Check the uplink credentials before anything is allocated, so a typo is a
+	 * message box and not a silent failure 40 seconds into Windows 95. The
+	 * same validator runs in the bridge firmware, so passing here means the
+	 * bridge will accept the pair.
+	 */
+	if (config.wifi_ssid || config.wifi_password) {
+		CxlinkWifiResult uplink = cxlink_wifi_check(config.wifi_ssid,
+							   config.wifi_password);
+
+		if (uplink != CXLINK_WIFI_OK) {
+			snprintf(boot_error, sizeof(boot_error),
+				 "[network] in %s: %s.\n"
+				 "ssid is 1-31 characters, password 0 (open "
+				 "network) or 8-63.",
+				 config_path, cxlink_wifi_result_text(uplink));
+			return startup_error(&config, boot_error);
+		}
+		/* Empty ssid with a password is refused above, so this is "asked
+		 * for a network". */
+		uplink_configured = config.wifi_ssid && config.wifi_ssid[0];
+	}
 	if (!preflight_boot_files(&config))
 		return startup_error(&config, boot_error);
 	if (!reserve_guest_memory(&config)) {
@@ -882,6 +1240,17 @@ int main(int argc, char **argv)
 			 "Lower mem_size in %s.", config_path);
 		return startup_error(&config, boot_error);
 	}
+	if (hw.rotated_panel) {
+		display.rotate_buffer = calloc(1, ROTATE_BUFFER_BYTES);
+		if (!display.rotate_buffer) {
+			snprintf(boot_error, sizeof(boot_error),
+				 "Not enough free RAM for the rotating panel buffer.\n"
+				 "Lower mem_size in %s.", config_path);
+			free(display.framebuffer);
+			display.framebuffer = NULL;
+			return startup_error(&config, boot_error);
+		}
+	}
 	reset_guest_timer();
 	pc = pc_new(redraw, &display, display.framebuffer, &config);
 	load_bios_and_reset(pc);
@@ -890,10 +1259,14 @@ int main(int argc, char **argv)
 	reset_guest_timer();
 	i8254_rebase(pc->pit);
 	pc->boot_start_time = get_uticks();
+	io_bridge_reset();
+	bridge_config = &config;
+	cxlink_start_default();
 
 	while (pc->shutdown_state != 8 && !on_key_pressed()) {
 		pc_step(pc);
 		advance_guest_timer(pc);
+		service_io_bridge(pc);
 		if (!first_step_done) {
 			if (display.ready) {
 				draw_frame(&display, true);
@@ -914,10 +1287,91 @@ int main(int argc, char **argv)
 	}
 	if (on_key_pressed())
 		wait_no_key_pressed();
+	/*
+	 * Drain the held partial audio block and tell the ESP32 to play out what it
+	 * has, before the UART goes away with the emulator.
+	 */
+	audio_samples_sent += cxlink_audio_resampler_feed(&audio_resampler, NULL, 0,
+							  true);
+	cxlink_audio_flush();
+	/*
+	 * One-shot bridge summary, and only when there is something to report:
+	 * audio that never reached a link, or audio the scheduler had to drop.
+	 * The healthy case stays silent, so this cannot turn into exit noise.
+	 */
+	if (audio_frames_dropped || (audio_samples_sent && !cxlink_link_up())) {
+		char bridge_note[192];
+
+		snprintf(bridge_note, sizeof(bridge_note),
+			 "Audio bridge: %u PCM blocks sent, %u dropped.\n"
+			 "%s\nSee CX_PORT_STATUS.md for the ESP32 link setup.",
+			 (unsigned)audio_samples_sent,
+			 (unsigned)audio_frames_dropped,
+			 cxlink_link_up() ? "ESP32 link was up."
+					  : "No ESP32 link came up.");
+		show_msgbox("WiNspire", bridge_note);
+	}
+	/*
+	 * Uplink summary, again only when there is something to report: a Wi-Fi
+	 * password that was refused at startup, credentials that never got a
+	 * confirmation, or a bridge that answered refused to associate. The
+	 * healthy case (confirmed, connected) stays silent, exactly like the audio
+	 * note above. The password never appears in any of this.
+	 */
+	if (provision_note_valid || cxlink_link_up() || uplink_configured) {
+		CxlinkProvisionStatus prov;
+		const char *uplink_text = NULL;
+
+		cxlink_net_provision_status(&prov);
+		if (uplink_configured && !provision_done)
+			/* The most common failure with no hardware attached, and
+			 * otherwise completely silent. */
+			uplink_text = "No ESP32 answered on the dock link, so the "
+				      "Wi-Fi credentials were never sent.\n"
+				      "Check the dock connection and "
+				      "-DWINSPIRE_CXLINK_UART.";
+		else if (prov.state == CXLINK_NET_STATE_REJECTED)
+			uplink_text = "The access point refused the credentials.";
+		else if (prov.state == CXLINK_NET_STATE_CONNECTED)
+			uplink_text = NULL; /* healthy: say nothing */
+		else if (prov.confirmed)
+			uplink_text = "The ESP32 has the credentials but is not "
+				      "associated yet.";
+		else if (prov.pending)
+			uplink_text = "The ESP32 never confirmed the credentials "
+				      "(send count below).";
+		else if (provision_note_valid)
+			uplink_text = provision_note;
+
+		if (uplink_text) {
+			char uplink_note[192];
+
+			snprintf(uplink_note, sizeof(uplink_note),
+				 "%s\nUplink: %u credential frame(s) sent, "
+				 "%s.\nSee NETWORK_ARCHITECTURE.md 6.3.",
+				 uplink_text, (unsigned)prov.sends,
+				 prov.confirmed ? "confirmed by the ESP32"
+						: "never confirmed");
+			show_msgbox("WiNspire", uplink_note);
+		}
+	}
+	/*
+	 * Forget the uplink password on the way out. It is not needed once the
+	 * bridge holds it, and a secret should not stay in RAM after the emulator
+	 * has exited. (The bridge keeps its own RAM-only copy; the next session
+	 * provisions it again automatically.)
+	 */
+	cxlink_net_provision_clear();
+	if (config.wifi_password)
+		memset((void *)config.wifi_password, 0, strlen(config.wifi_password));
 	lcd_init(SCR_TYPE_INVALID);
 	restore_os_cursor(saved_cursor);
+	/* Never leave the ARM926 overclocked after handing control back to TI-OS. */
+	if (cpu_speed_changed)
+		set_cpu_speed(saved_cpu_speed);
 	refresh_osscr();
 	pc_free_buffers(pc);
+	free(display.rotate_buffer);
 	free(display.framebuffer);
 	free_config_paths(&config);
 	free_reserved_memory();

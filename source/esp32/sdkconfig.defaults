@@ -1,0 +1,18 @@
+# cxlink bridge: configuration that is a requirement of the firmware, not a
+# preference.
+#
+# These are also set in the tracked sdkconfig, which is what a build actually
+# reads. They are repeated here for the case that sdkconfig is deleted and
+# regenerated: ESP-IDF only applies sdkconfig.defaults to symbols that the
+# existing sdkconfig does not already contain, and both of these are present
+# there as "# CONFIG_... is not set".
+#
+# main.c fails to compile without them (see the #error block near its includes).
+
+# The guest's traffic is forwarded between the calculator-link interface and the
+# Wi-Fi station interface.
+CONFIG_LWIP_IP_FORWARD=y
+
+# ... and translated on the way out, so the access point only ever sees the
+# ESP32's own address and the guest subnet stays private to the UART link.
+CONFIG_LWIP_IPV4_NAPT=y
