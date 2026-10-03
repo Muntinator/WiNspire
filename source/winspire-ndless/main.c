@@ -1,4 +1,5 @@
 #include <libndls.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1083,6 +1084,51 @@ static void free_config_paths(PCConfig *config)
 	}
 }
 
+/* ------------------------------------------------------------------ */
+/* Diagnostic trace sink (DEBUG profile; see cx_profiles.h)             */
+/* ------------------------------------------------------------------ */
+/*
+ * i386.c calls nspire_log() for its diagnostic trace, and only in the DEBUG
+ * profile: RELEASE and TURBO compile those call sites out entirely. The
+ * calculator has no console, so every line goes to stderr (visible when the
+ * program is launched from the Ndless shell) and to winspire.log.tns in the
+ * program's folder.
+ *
+ * The file is flushed per line on purpose. The DEBUG profile exists to
+ * diagnose a hang, and a hang must not cost the end of the trace. The trace is
+ * exception-driven and low-volume (see the call sites in i386.c), so a flush
+ * per line is affordable here; it would not be for per-instruction logging.
+ */
+static FILE *diag_log_file;
+
+void nspire_log(const char *fmt, ...)
+{
+	va_list args;
+
+	fputs("[diag] ", stderr);
+	va_start(args, fmt);
+	vfprintf(stderr, fmt, args);
+	va_end(args);
+
+	if (!diag_log_file)
+		diag_log_file = fopen("winspire.log.tns", "wb");
+	if (diag_log_file) {
+		va_start(args, fmt);
+		vfprintf(diag_log_file, fmt, args);
+		va_end(args);
+		/* A hang must not cost the tail of the trace. */
+		fflush(diag_log_file);
+	}
+}
+
+static void diag_close_log(void)
+{
+	if (diag_log_file) {
+		fclose(diag_log_file);
+		diag_log_file = NULL;
+	}
+}
+
 static int startup_error(PCConfig *config, const char *message)
 {
 	free_config_paths(config);
@@ -1122,6 +1168,10 @@ int main(int argc, char **argv)
 	mode_changed = false;
 	memset(&hw, 0, sizeof(hw));
 	boot_error[0] = '\0';
+#if defined(WINSPIRE_PROFILE_DEBUG)
+	/* First line of the trace: "did this .tns start at all". */
+	nspire_log("winspire: %s profile starting\n", WINSPIRE_PROFILE_NAME);
+#endif
 	if (!detect_hardware()) {
 		refresh_osscr();
 		show_msgbox("WiNspire", boot_error);
@@ -1364,6 +1414,8 @@ int main(int argc, char **argv)
 	cxlink_net_provision_clear();
 	if (config.wifi_password)
 		memset((void *)config.wifi_password, 0, strlen(config.wifi_password));
+	/* No-op outside the DEBUG profile, which writes winspire.log.tns. */
+	diag_close_log();
 	lcd_init(SCR_TYPE_INVALID);
 	restore_os_cursor(saved_cursor);
 	/* Never leave the ARM926 overclocked after handing control back to TI-OS. */

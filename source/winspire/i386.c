@@ -3726,7 +3726,10 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	case 0xc: cond =  get_SF(cpu) != get_OF(cpu); break; \
 	case 0xd: cond =  get_SF(cpu) == get_OF(cpu); break; \
 	case 0xe: cond =  get_ZF(cpu) || get_SF(cpu) != get_OF(cpu); break; \
-	case 0xf: cond = !get_ZF(cpu) && get_SF(cpu) == get_OF(cpu); break; \
+	/* 0xf is jg. Written as default so the switch is provably exhaustive:
+	 * the selector is b1 & 0xf, but GCC 10 at -O1 cannot see that and warns
+	 * about an uninitialised cond in every JCC/SETCC expansion. */ \
+	default: cond = !get_ZF(cpu) && get_SF(cpu) == get_OF(cpu); break; \
 	}
 
 #define JCC_common(d) \

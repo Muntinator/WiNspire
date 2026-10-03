@@ -11,10 +11,13 @@
 #
 # Output in build/CX/:
 #   nspire95-cx.tns     the emulator
+#   nspire95-cx.elf     same build with symbols; keep it for crash forensics
+#                       on the first hardware session
 #   bios.bin.tns        companion BIOS image (see docs, BIOS is not bundled
 #                       here for licensing reasons unless legally redistributable)
 #   vgabios.bin.tns     companion VGA BIOS image
 #   winspire.ini.tns    default configuration
+#   bench386.img.tns    bootable smoke-test floppy (from `make bench`)
 set -euo pipefail
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -130,8 +133,17 @@ rm -f "$work/nspire95-cx.tns.zehn"
 # their license permits redistribution (see README_CX.md).
 install -m 0644 "$core/bios.bin" "$out/bios.bin.tns"
 install -m 0644 "$core/vgabios.bin" "$out/vgabios.bin.tns"
-sed 's/^hda = .*/hda = disk.img.tns/' \
-	"$core/native.ini.tns" > "$out/winspire.ini.tns"
+# native.ini.tns *is* the shipping configuration: it boots the test floppy out
+# of the box and documents the one-line switch to a Windows 95 hard disk.
+install -m 0644 "$core/native.ini.tns" "$out/winspire.ini.tns"
+if [ -f "$build/bench/bench386.img" ]; then
+	install -m 0644 "$build/bench/bench386.img" "$out/bench386.img.tns"
+else
+	echo "note: $build/bench/bench386.img missing; run 'make bench' for the test floppy" >&2
+fi
+# Unstripped ELF: -g symbols are the only way to make sense of a crash on
+# hardware, where there is no debugger and no core dump.
+install -m 0644 "$work/nspire95-cx.elf" "$out/nspire95-cx.elf"
 
 size=$(wc -c < "$out/nspire95-cx.tns")
 rm -rf "$work"

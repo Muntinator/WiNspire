@@ -6,8 +6,10 @@ difference between "written and type-checked" and "observed working on a
 calculator" is the whole difficulty of a port like this.
 
 **Nothing in this repository has been run on a TI-Nspire CX.** There is no
-calculator, no Ndless SDK, and no ARM toolchain in the environment where this
-work was done. Every claim below is labelled with how it was verified.
+calculator in the environment where this work was done. The Ndless toolchain
+was assembled here (see §9), so real `.tns` binaries now exist and are
+validated structurally - but nothing has executed them. Every claim below is
+labelled with how it was verified.
 
 ---
 
@@ -236,14 +238,56 @@ hardware — see [AUDIO_ARCHITECTURE.md](AUDIO_ARCHITECTURE.md).
 `AUDIO_ARCHITECTURE.md`, `NETWORK_ARCHITECTURE.md`, `HARDWARE.md`,
 `source/esp32/README.md`.
 
+### 9. Calculator binaries — **builds clean**, **byte-reproducible**; runtime
+**unverified**
+
+`nspire95-cx.tns` exists. The toolchain blocker is closed by
+`source/build-scripts/setup_ndless_sdk.sh`, which assembles a working Ndless
+SDK in about a minute out of Ubuntu's arm-none-eabi GCC 10.3 + newlib and the
+Ndless sources (libndls, libsyscalls, the zehn loaders, genzehn) instead of
+building upstream's binutils/gcc/newlib from source. Four environment
+compatibility fixes are needed; each is marked and explained in the script
+(newlib 3.3 losing `PATH_MAX` and wanting `_init`/`_fini`, binutils 2.38
+rejecting a newer ldscript sort expression, and a php-based header
+regeneration rule).
+
+All three profiles build here with zero warnings (`make cx`, `make cx-release`,
+`make cx-debug`):
+
+```
+nspire95-cx.tns          381252 bytes   TURBO
+nspire95-cx-release.tns  361956 bytes   RELEASE
+nspire95-cx-debug.tns    335212 bytes   DEBUG
+```
+
+What is verified about them:
+
+- `genzehn --info` parses the zehn header inside each one: correct application
+  name/author/notice, valid relocations, correct entry point.
+- The package's own media boots: the shipped `winspire.ini.tns` together with
+  `bench386.img.tns` runs on the workstation build of the *same core* and the
+  benchmark payload completes (3.86 M instructions of BIOS POST first).
+- **Byte-reproducible**: running `setup_ndless_sdk.sh` into a fresh directory
+  and rebuilding produced a byte-identical `nspire95-cx.tns`.
+- The first real link caught two defects that type-checking structurally
+  cannot: the DEBUG profile calls `nspire_log()` and no calculator frontend
+  defined it (the sink now lives in `source/winspire-ndless/main.c` and writes
+  `winspire.log.tns` line by line), and GCC 10 could not prove the `COND()`
+  switch in `i386.c` exhaustive (it is written so that it can).
+
+What is **not** verified: execution on a calculator. A `.tns` that validates
+and links can still hang at `lcd_init`, draw a rotated screen or crash in the
+first `pc_step`; that is what the first hardware session is for. The DEBUG
+build and the unstripped `nspire95-cx.elf` (kept in `build/CX/`) exist for
+that session.
+
 ---
 
 ## Not done, and what it needs
 
 | Item | Blocker |
 |---|---|
-| Producing `nspire95-cx.tns` | Ndless SDK (`nspire-gcc`, `nspire-ld`, `genzehn`, `make-prg`). `build_cx.sh` is written and syntax-checked but has never run. |
-| Running on a CX at all | A calculator. |
+| Running `nspire95-cx.tns` | A calculator. The binaries are built and structurally validated (§9); none of them has ever executed. |
 | Booting Windows 95 | A legally obtained install image plus the above. |
 | Confirming the rotated-panel direction | A CX of revision W or later. `WINSPIRE_PANEL_ROTATE_CCW` must be set empirically. |
 | Confirming the dock UART MMIO base | Hardware. `WINSPIRE_CXLINK_UART_BASE` defaults to `0x90040000` by analogy with the classic Nspire; it is **not** confirmed for the CX SoC. |
@@ -313,16 +357,16 @@ hidden; closed items are struck through so the history stays visible:
 
 In order, and each is a hard prerequisite for the next:
 
-1. A Ndless SDK, to produce a `.tns` at all.
-2. A CX unit, to observe the panel orientation and confirm the port boots the
-   BIOS and reaches VGA output.
-3. Confirmation of the dock UART base, or a scope on the dock Tx pin.
-4. A Windows 95 image, to see a real desktop, and then a performance cycle on
+1. A CX unit, to observe the panel orientation and confirm the port boots the
+   BIOS and reaches VGA output. (The `.tns` files exist - see §9 - this step
+   is now purely observational.)
+2. Confirmation of the dock UART base, or a scope on the dock Tx pin.
+3. A Windows 95 image, to see a real desktop, and then a performance cycle on
    real ARM926 hardware.
-5. For the audio and network half: an ESP32 board. Its firmware already builds
+4. For the audio and network half: an ESP32 board. Its firmware already builds
    and produces validated images (`make esp32`), but nothing has been flashed, so
    the I2S path, the UART link, the DHCP server against a real guest and the
    router have never executed.
 
-Items 1 and 2 are the ones that change this from "carefully ported and type
+Item 1 is the one that changes this from "carefully ported, built and type
 checked" to "known to work".

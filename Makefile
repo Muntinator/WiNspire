@@ -20,14 +20,14 @@ help:
 	@echo "  make clean      Remove all build output"
 
 # --- original TI-Nspire CX -------------------------------------------------
-cx:
+cx: bench
 	@bash source/build-scripts/build_cx.sh TURBO
 	@echo "CX build: build/CX/nspire95-cx.tns"
 
-cx-debug:
+cx-debug: bench
 	@bash source/build-scripts/build_cx.sh DEBUG
 
-cx-release:
+cx-release: bench
 	@bash source/build-scripts/build_cx.sh RELEASE
 
 check-cx:

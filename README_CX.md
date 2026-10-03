@@ -19,7 +19,7 @@ runs its own drivers and its own TCP/IP stack.
 
 | To build | To run |
 |---|---|
-| The [Ndless SDK](https://github.com/ndless-nspire/Ndless) (`nspire-gcc`, `nspire-ld`, `genzehn`, `make-prg`) | A TI-Nspire **CX** or **CX CAS** |
+| The [Ndless SDK](https://github.com/ndless-nspire/Ndless) (`nspire-gcc`, `nspire-ld`, `genzehn`, `make-prg`) plus an ARM cross compiler — `source/build-scripts/setup_ndless_sdk.sh` assembles the whole toolchain in one step | A TI-Nspire **CX** or **CX CAS** |
 | Bash | Ndless 4.x installed |
 | ~200 MB disk | A legally obtained Windows 95 disk image |
 | | (optional) an ESP32 for audio and networking (firmware in `source/esp32/`) |
@@ -29,8 +29,20 @@ cannot display the 16bpp guest surface.
 
 ## 2. Build
 
+No toolchain handy? Prebuilt calculator files are attached to every GitHub
+release (`nspire95-cx-calculator.zip`) — you can skip this whole section.
+
+To build yourself, assemble the toolchain once (Debian/Ubuntu; needs root for
+the package step, about a minute):
+
 ```sh
-export NDLESS_SDK=/path/to/ndless-sdk
+source/build-scripts/setup_ndless_sdk.sh      # installs to ~/Ndless
+```
+
+Then:
+
+```sh
+export NDLESS_SDK=$HOME/Ndless/ndless-sdk     # optional if that is the location
 
 # TURBO is the default and is what you want on a CX.
 source/build-scripts/build_cx.sh TURBO
@@ -43,10 +55,12 @@ source/build-scripts/build_cx.sh DEBUG
 Output lands in `build/CX/`:
 
 ```
-nspire95-cx.tns      the emulator
-bios.bin.tns         companion BIOS image
-vgabios.bin.tns      companion VGA BIOS image
-winspire.ini.tns     default configuration
+nspire95-cx.tns        the emulator (TURBO profile)
+nspire95-cx.elf        the same build with symbols, for crash forensics
+bios.bin.tns           companion BIOS image
+vgabios.bin.tns        companion VGA BIOS image
+winspire.ini.tns       default configuration (boots the test floppy)
+bench386.img.tns       bootable smoke-test floppy (from `make bench`)
 ```
 
 ### Profiles
@@ -58,7 +72,7 @@ construction in `source/winspire/cx_profiles.h`.
 
 | Profile | Optimisation | Batching | Use |
 |---|---|---|---|
-| `DEBUG` | `-O1`, no frame-pointer omission, instruction tracing, 1-instruction batches | trace-accurate | Bringing up the port, diagnosing a hang |
+| `DEBUG` | `-O1`, no frame-pointer omission, instruction tracing, 1-instruction batches | trace-accurate | Bringing up the port, diagnosing a hang; the trace goes to `winspire.log.tns` |
 | `RELEASE` | `-Os` core, `-O3` hot paths | moderate | General use |
 | `TURBO` | `-Os` core, `-O3` hot paths, interpreter fast paths, fastest input sampling | large | Default; fastest desktop |
 
@@ -107,19 +121,26 @@ ARM926 throughput, and that no run here has ever produced real audio content.
 
 ## 3. Installing on the calculator
 
-Copy all four files to the same folder on the calculator:
+Copy all of these to the same folder on the calculator (`nspire95-cx-calculator.zip`
+from the release page is exactly this set):
 
 ```
-nspire95-cx.tns
+nspire95-cx.tns        the emulator
 bios.bin.tns
 vgabios.bin.tns
 winspire.ini.tns
-disk.img.tns          <- your Windows 95 disk image (see §4)
+bench386.img.tns       bootable test floppy
 ```
 
-Then run `nspire95-cx.tns`. Errors are reported through a system message box
-before the LCD is taken over, so a bad path or a missing file does not leave you
-with a black screen.
+Then run `nspire95-cx.tns`. Out of the box it boots `bench386.img.tns`: the
+emulated PC POSTs and runs a small x86 benchmark payload on the emulated
+screen, which is the fastest way to see that the whole stack works before any
+Windows 95 image is involved. Errors are reported through a system message box
+before the LCD is taken over, so a bad path or a missing file does not leave
+you with a black screen.
+
+To boot Windows 95 instead: copy `disk.img.tns` over (see §4), comment out the
+`fda` line in `winspire.ini.tns` and uncomment `hda = disk.img.tns`.
 
 ## 4. Disk image
 
@@ -154,7 +175,8 @@ bios = bios.bin.tns
 vga_bios = vgabios.bin.tns
 mem_size = 16M          ; 4M..32M; the CX has 64 MiB of SDRAM
 vga_mem_size = 256K     ; 64K..1M
-hda = disk.img.tns
+;hda = disk.img.tns     ; your Windows 95 image (see §4)
+fda = bench386.img.tns  ; included test floppy; comment out when using hda
 fill_cmos = 1           ; 1 for Windows 95
 
 [display]

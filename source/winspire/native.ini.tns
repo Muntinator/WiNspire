@@ -3,7 +3,14 @@ bios = bios.bin.tns
 vga_bios = vgabios.bin.tns
 mem_size = 16M
 vga_mem_size = 256K
-hda = win95.img.tns
+
+; Boot media. The included benchmark floppy boots on its own, so a fresh
+; install shows something on screen with no extra files. For Windows 95:
+; rename your raw disk image to disk.img.tns, uncomment the hda line and
+; comment out the fda line (the floppy would otherwise boot first).
+;hda = disk.img.tns
+fda = bench386.img.tns
+
 fill_cmos = 1
 
 [display]
