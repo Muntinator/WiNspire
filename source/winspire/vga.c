@@ -188,6 +188,20 @@ struct VGAState {
     uint16_t last_cursor_offset;
     uint8_t last_cursor_start;
     uint8_t last_cursor_end;
+    /*
+     * Skip-the-scan state (TINY386_LCD_DIRTY_RENDER builds only).
+     *
+     * raster_content_gen is bumped by every VGA register write and every
+     * guest VRAM store, so any change that can alter a rendered pixel bumps
+     * it. A text refresh whose raster_content_gen matches the one the last
+     * scan consumed cannot draw anything new, and is skipped outright
+     * instead of re-walking all width*height character cells to rediscover
+     * that none of them differ.
+     */
+    uint32_t raster_content_gen;
+    uint32_t text_scan_gen;
+    int text_scan_blink;
+    int text_scan_valid;
 
     /* VBE extension */
     uint16_t vbe_index;
@@ -923,8 +937,7 @@ static bool vga_text_scale2(
             int dst_y;
             int oy;
 
-            if (!full_update && ch_attr == s->last_ch_attr[cell] &&
-                cursor_offset != ch_addr)
+            if (!full_update && ch_attr == s->last_ch_attr[cell])
                 continue;
             s->last_ch_attr[cell] = ch_attr;
             ch = ch_attr & 0xff;
@@ -1008,10 +1021,31 @@ static void vga_text_refresh(VGAState *s,
     const uint8_t *font_ptr;
     uint32_t fgcol, bgcol, cursor_offset, cursor_start, cursor_end;
     uint32_t now = get_uticks();
+    int blink_toggled = 0;
     if (after_eq(now, s->cursor_blink_time)) {
         s->cursor_blink_time = now + 133333;
         s->cursor_visible_phase = !s->cursor_visible_phase;
+        blink_toggled = 1;
     }
+
+    #if defined(TINY386_LCD_DIRTY_RENDER) && !defined(FULL_UPDATE)
+    /*
+     * A refresh is driven by the retrace poll, not by anything changing on
+     * screen, so on a static text screen almost every one of these calls has
+     * nothing to redraw. Comparing one counter instead of rebuilding the
+     * attribute palette and walking width*height character cells is the
+     * difference between a screenful of memory reads and nothing at all, per
+     * poll. The palette cannot have changed either: an attribute or DAC
+     * write is a register write, and those bump the same counter.
+     */
+    if (!full_update && s->text_scan_valid &&
+        s->raster_content_gen == s->text_scan_gen &&
+        s->text_scan_blink == s->cursor_visible_phase)
+        return;
+    s->text_scan_valid = 1;
+    s->text_scan_gen = s->raster_content_gen;
+    s->text_scan_blink = s->cursor_visible_phase;
+#endif
 
     full_update = full_update || update_palette16(s, s->last_palette);
 
@@ -1103,9 +1137,16 @@ static void vga_text_refresh(VGAState *s,
     cursor_end = s->cr[0xb];
     if (cursor_offset != s->last_cursor_offset ||
         cursor_start != s->last_cursor_start ||
-        cursor_end != s->last_cursor_end) {
+        cursor_end != s->last_cursor_end ||
+        blink_toggled) {
 #ifndef FULL_UPDATE
-        /* force refresh of characters with the cursor */
+        /*
+         * Force a redraw of the cells the cursor touched. The cursor cell is
+         * cached like any other, so the cell it moved off of and the cell it
+         * moved onto are invalidated here. A blink phase change invalidates
+         * the cell it is on, which is what makes the underline appear and
+         * disappear without redrawing the cursor cell on every single poll.
+         */
         if (s->last_cursor_offset < MAX_TEXT_WIDTH * MAX_TEXT_HEIGHT)
             s->last_ch_attr[s->last_cursor_offset] = -1;
         if (cursor_offset < MAX_TEXT_WIDTH * MAX_TEXT_HEIGHT)
@@ -1163,7 +1204,7 @@ static void vga_text_refresh(VGAState *s,
 #ifdef FULL_UPDATE
             if (1) {
 #else
-            if (full_update || ch_attr != s->last_ch_attr[cy * width + cx] || cursor_offset == ch_addr) {
+            if (full_update || ch_attr != s->last_ch_attr[cy * width + cx]) {
                 s->last_ch_attr[cy * width + cx] = ch_attr;
 #endif
                 cx_min = cx_min > cx ? cx : cx_min;
@@ -2384,6 +2425,8 @@ void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
         (addr >= 0x3d0 && addr <= 0x3df && !(s->msr & MSR_COLOR_EMULATION)))
         return;
 
+    /* Any register write can change what a rendered pixel looks like. */
+    s->raster_content_gen++;
 
 #ifdef DEBUG_VGA
     printf("VGA: write addr=0x%04x data=0x%02x\n", addr, val);
@@ -2516,6 +2559,7 @@ static void vga_write_ ## base(void *opaque, uint32_t addr, uint32_t val, int si
 
 void vbe_write(VGAState *s, uint32_t offset, uint32_t val)
 {
+    s->raster_content_gen++;
     if (offset == 0) {
         s->vbe_index = val;
     } else {
@@ -2873,6 +2917,7 @@ void IRAM_ATTR vga_mem_write16(VGAState *s, uint32_t addr, uint16_t val16)
 {
     if (s->text_hold_default)
         s->vram_write_generation++;
+    s->raster_content_gen++;
     if (vga_chain4_addr(s, &addr, 2)) {
         vga_dirty_mode13(s, addr, 2);
         s->vga_ram[addr] = val16;
@@ -2936,6 +2981,7 @@ void IRAM_ATTR vga_mem_write32(VGAState *s, uint32_t addr, uint32_t val)
 {
     if (s->text_hold_default)
         s->vram_write_generation++;
+    s->raster_content_gen++;
     if (vga_chain4_addr(s, &addr, 4)) {
         vga_dirty_mode13(s, addr, 4);
         s->vga_ram[addr] = val;
@@ -3002,6 +3048,7 @@ void IRAM_ATTR vga_mem_write32(VGAState *s, uint32_t addr, uint32_t val)
 
 bool IRAM_ATTR vga_mem_write_string(VGAState *s, uint32_t addr, uint8_t *buf, int len)
 {
+    s->raster_content_gen++;
     if (len > 0) {
         if (s->text_hold_default)
             s->vram_write_generation++;
@@ -3064,6 +3111,7 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
 
     if (s->text_hold_default)
         s->vram_write_generation++;
+    s->raster_content_gen++;
     if (vga_chain4_addr(s, &addr, 1)) {
         vga_dirty_mode13(s, addr, 1);
         s->vga_ram[addr] = val8;
@@ -3348,6 +3396,7 @@ void vga_delete(VGAState *s)
 
 void vga_set_force_8dm(VGAState *s, int v)
 {
+    s->raster_content_gen++;
     s->force_8dm = v;
 }
 
@@ -3698,4 +3747,5 @@ static void vga_initmode(VGAState *s)
     }
 
     s->ar_index = 0x20;
+    s->raster_content_gen++;
 }

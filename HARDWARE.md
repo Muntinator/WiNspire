@@ -44,7 +44,15 @@ Consequences for this port, all implemented in `source/winspire-ndless/main.c`:
   PL111 map, so it is never written on a CX.
 - **ASSUMPTION:** the rotation direction for a 240x320 panel. It varies by
   mount and cannot be read from the Ndless API. `WINSPIRE_PANEL_ROTATE_CCW`
-  selects it and must be set empirically on hardware.
+  selects it and must be set empirically on hardware. This is a rotation
+  choice only.
+- The original CX (MADCTL `0x08`, no row/column exchange) scans its framebuffer
+  **bottom-up**: TI-Nspire OS draws from a bottom-left origin, so scanline 0 is
+  the bottom of the panel. The VGA core produces a top-down surface, so the
+  frontend flips it vertically before presenting (`flip_surface_vertical()` in
+  `source/winspire-ndless/main.c`). A transposed panel does not need this -
+  its row/column exchange puts scanline 0 back at the top - which is why the
+  flip is keyed on `!rotated_panel` and not applied to both.
 
 ### 1.2 CPU speed control
 
@@ -200,7 +208,8 @@ that an ESP32 is providing the physical network connection" requires.
 1. Confirm the unit is a **colour** Nspire (CX / CX CAS / CX II), not a
    grayscale Clickpad/Touchpad.
 2. Note the hardware revision — a 240x320 panel means revision W or later, and
-   `WINSPIRE_PANEL_ROTATE_CCW` may need flipping.
+   `WINSPIRE_PANEL_ROTATE_CCW` may need flipping. The original CX needs no
+   such choice: its vertical flip is handled in the frontend.
 3. Check J01 is populated before soldering an ESP32 to it.
 4. Have Ndless installed and note its revision (`assert_ndless_rev(2004)`).
 5. Have `disk.img.tns`, `bios.bin.tns`, `vgabios.bin.tns` and

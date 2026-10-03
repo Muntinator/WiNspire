@@ -140,6 +140,7 @@ static bool detect_hardware(void)
 typedef struct {
 	u8 *framebuffer;
 	uint16_t *rotate_buffer; /* only allocated for a rotated panel */
+	uint16_t *flip_buffer;   /* only allocated when the panel scans bottom-up */
 	bool ready;
 	bool lcd_active;
 	bool dirty;
@@ -676,6 +677,8 @@ static void draw_frame(Display *display, bool force)
 	display->last_draw_ms = now;
 }
 
+static void flip_surface_vertical(const uint16_t *src, uint16_t *dst);
+
 static void draw_region(Display *display,
 		int left, int top, int width, int height)
 {
@@ -698,12 +701,43 @@ static void draw_region(Display *display,
 		draw_frame(display, false);
 		return;
 	}
+	/*
+	 * The panel scans bottom-up, so screen row top maps to panel row
+	 * SCREEN_HEIGHT - 1 - top. A partial update has to be written back
+	 * upside down to land on the same physical scanlines; mirroring it
+	 * row-wise here is cheaper than falling back to a whole-frame flip.
+	 */
 	if (!claim_lcd(display, false, now, NULL))
 		return;
-	source = (uint16_t *)display->framebuffer +
-		top * SCREEN_WIDTH + left;
-	screen = (uint16_t *)REAL_SCREEN_BASE_ADDRESS +
-		top * SCREEN_WIDTH + left;
+	if (display->flip_buffer) {
+		int mirror = SCREEN_HEIGHT - 1 - top;
+
+		if (height == SCREEN_HEIGHT) {
+			flip_surface_vertical(
+				(const uint16_t *)display->framebuffer,
+				display->flip_buffer);
+		} else {
+			for (row = 0; row < height; row++) {
+				memcpy((uint16_t *)
+				       display->flip_buffer +
+				       (size_t)(mirror - row) * SCREEN_WIDTH +
+				       left,
+				       (const uint16_t *)
+				       display->framebuffer +
+				       (size_t)(top + row) * SCREEN_WIDTH +
+				       left,
+				       (size_t)width * sizeof(uint16_t));
+			}
+		}
+		source = display->flip_buffer + (size_t)mirror * SCREEN_WIDTH + left;
+		screen = (uint16_t *)REAL_SCREEN_BASE_ADDRESS +
+			(size_t)mirror * SCREEN_WIDTH + left;
+	} else {
+		source = (uint16_t *)display->framebuffer +
+			top * SCREEN_WIDTH + left;
+		screen = (uint16_t *)REAL_SCREEN_BASE_ADDRESS +
+			top * SCREEN_WIDTH + left;
+	}
 	if (width == SCREEN_WIDTH) {
 		memcpy(screen, source,
 			(size_t)height * SCREEN_WIDTH * sizeof(uint16_t));
@@ -861,9 +895,11 @@ static void restore_os_cursor(uint32_t saved_cursor)
  * sequential read and a column-strided write, which is the cheapest correct
  * option without a rotating LCD controller mode.
  *
- * If the image appears mirrored or upside down on a particular unit, flip
- * WINSPIRE_PANEL_ROTATE_CCW: the panel mount direction varies across hardware
- * revisions and cannot be determined at runtime from the Ndless API.
+ * WINSPIRE_PANEL_ROTATE_CCW selects which way that transposition runs, for
+ * units whose panel is mounted the other way round. It is a mount-direction
+ * choice only; it cannot correct a vertical flip, because a mirror is not a
+ * rotation. The bottom-up scan order that does need correcting is handled by
+ * flip_surface_vertical() below.
  */
 static void rotate_surface(const uint16_t *src, uint16_t *dst)
 {
@@ -885,6 +921,33 @@ static void rotate_surface(const uint16_t *src, uint16_t *dst)
 #endif
 }
 
+/*
+ * TI-Nspire OS draws in a Cartesian frame: the origin is the bottom-left of the
+ * screen and y increases upward (screen.drawString, gui_gc_fillRect and every
+ * other OS drawing entry point take y that way). The framebuffer behind
+ * REAL_SCREEN_BASE_ADDRESS therefore stores scanline 0 at the BOTTOM of the
+ * panel and climbs from there.
+ *
+ * The VGA core produces a conventional top-down surface: its row 0 is the top
+ * scanline. Handing that to lcd_blit() unchanged therefore presents the whole
+ * image vertically mirrored on any panel that is not transposed.
+ *
+ * A rotated panel is transposed by rotate_surface() above, and the panel
+ * controller's MADCTL row/column-exchange bit then puts scanline 0 back at the
+ * top, so that path already needs no flip. The original CX (MADCTL 0x08, no
+ * exchange) is the case that has to be corrected here, which is why this is
+ * keyed on !rotated_panel rather than applied to both.
+ */
+static void flip_surface_vertical(const uint16_t *src, uint16_t *dst)
+{
+	int row;
+
+	for (row = 0; row < SCREEN_HEIGHT; row++)
+		memcpy(dst + (size_t)row * SCREEN_WIDTH,
+		       src + (size_t)(SCREEN_HEIGHT - 1 - row) * SCREEN_WIDTH,
+		       (size_t)SCREEN_WIDTH * sizeof(uint16_t));
+}
+
 static void panel_blit(Display *display)
 {
 	if (!display->framebuffer)
@@ -895,6 +958,13 @@ static void panel_blit(Display *display)
 		rotate_surface((const uint16_t *)display->framebuffer,
 			       display->rotate_buffer);
 		lcd_blit(display->rotate_buffer, hw.panel_format);
+		return;
+	}
+	if (display->flip_buffer) {
+		flip_surface_vertical(
+			(const uint16_t *)display->framebuffer,
+			display->flip_buffer);
+		lcd_blit(display->flip_buffer, hw.panel_format);
 		return;
 	}
 	lcd_blit(display->framebuffer, hw.panel_format);
@@ -1300,6 +1370,20 @@ int main(int argc, char **argv)
 			display.framebuffer = NULL;
 			return startup_error(&config, boot_error);
 		}
+	} else {
+		/*
+		 * The panel scans bottom-up, so every present needs a flipped
+		 * copy. See flip_surface_vertical().
+		 */
+		display.flip_buffer = calloc(1, ROTATE_BUFFER_BYTES);
+		if (!display.flip_buffer) {
+			snprintf(boot_error, sizeof(boot_error),
+				 "Not enough free RAM for the panel flip buffer.\n"
+				 "Lower mem_size in %s.", config_path);
+			free(display.framebuffer);
+			display.framebuffer = NULL;
+			return startup_error(&config, boot_error);
+		}
 	}
 	reset_guest_timer();
 	pc = pc_new(redraw, &display, display.framebuffer, &config);
@@ -1424,6 +1508,7 @@ int main(int argc, char **argv)
 	refresh_osscr();
 	pc_free_buffers(pc);
 	free(display.rotate_buffer);
+	free(display.flip_buffer);
 	free(display.framebuffer);
 	free_config_paths(&config);
 	free_reserved_memory();

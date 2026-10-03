@@ -784,13 +784,39 @@ static bool pci_vga_addr(PC *pc, uword addr, uword *offset)
 	return false;
 }
 
+/*
+ * Map a guest address into the adapter's legacy video window.
+ *
+ * The window is 0xa0000-0xbffff, which is exactly what in_iomem() in i386.c
+ * routes to the iomem callbacks, so this never rejects an access the CPU meant
+ * for the adapter. Modes wider than 128 KiB - 640x480x16 needs 614 400 bytes -
+ * are not reachable this way on real hardware either, and are meant to be drawn
+ * through the linear framebuffer instead, which pci_vga_addr() above handles.
+ *
+ * This check is not cosmetic. The VGA device's read paths bounds-check, but its
+ * write paths do not all do so: the chain-4 fast path in vga_mem_write16() and
+ * vga_mem_write32() writes straight into s->vga_ram. Handing those an
+ * out-of-range offset walks off the end of the buffer, so a guest that fills a
+ * framebuffer larger than the window faults the emulator instead of writing to
+ * memory the way real hardware would.
+ */
+static bool legacy_vga_offset(PC *pc, uword addr, uword *offset)
+{
+	if (addr < 0xa0000 || addr >= 0xc0000)
+		return false;
+	*offset = addr - 0xa0000;
+	return true;
+}
+
 static u8 iomem_read8(void *iomem, uword addr)
 {
 	PC *pc = iomem;
 	uword offset;
 	if (pci_vga_addr(pc, addr, &offset))
 		return pc->vga_mem[offset];
-	return vga_mem_read(pc->vga, addr - 0xa0000);
+	if (!legacy_vga_offset(pc, addr, &offset))
+		return 0;
+	return vga_mem_read(pc->vga, offset);
 }
 
 static void iomem_write8(void *iomem, uword addr, u8 val)
@@ -801,7 +827,9 @@ static void iomem_write8(void *iomem, uword addr, u8 val)
 		pc->vga_mem[offset] = val;
 		return;
 	}
-	vga_mem_write(pc->vga, addr - 0xa0000, val);
+	if (!legacy_vga_offset(pc, addr, &offset))
+		return;
+	vga_mem_write(pc->vga, offset, val);
 }
 
 static u16 iomem_read16(void *iomem, uword addr)
@@ -825,7 +853,9 @@ static void iomem_write16(void *iomem, uword addr, u16 val)
 		}
 		return;
 	}
-	vga_mem_write16(pc->vga, addr - 0xa0000, val);
+	if (!legacy_vga_offset(pc, addr, &offset))
+		return;
+	vga_mem_write16(pc->vga, offset, val);
 }
 
 static u32 iomem_read32(void *iomem, uword addr)
@@ -851,7 +881,9 @@ static void iomem_write32(void *iomem, uword addr, u32 val)
 		}
 		return;
 	}
-	vga_mem_write32(pc->vga, addr - 0xa0000, val);
+	if (!legacy_vga_offset(pc, addr, &offset))
+		return;
+	vga_mem_write32(pc->vga, offset, val);
 }
 
 static bool iomem_write_string(void *iomem, uword addr, uint8_t *buf, int len)
@@ -866,7 +898,9 @@ static bool iomem_write_string(void *iomem, uword addr, uint8_t *buf, int len)
 		}
 		return false;
 	}
-	return vga_mem_write_string(pc->vga, addr - 0xa0000, buf, len);
+	if (!legacy_vga_offset(pc, addr, &offset))
+		return false;
+	return vga_mem_write_string(pc->vga, offset, buf, len);
 }
 
 static void pc_reset_request(void *p)

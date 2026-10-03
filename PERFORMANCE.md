@@ -130,6 +130,11 @@ payload steady-state: 20497676 steps / 0.251 s = 81.80 Msteps/s
 Repeat-run spread across five runs of the same binary: **76–82 Msteps/s**
 steady state, i.e. about ±4%. Differences smaller than that are noise.
 
+A later session on the same host measured this figure between 91 and
+107 Msteps/s (§3.4), i.e. the spread between *sessions* is wider than the spread
+within one. Treat any payload comparison as needing several runs on the same
+machine, and prefer the before/after pair in §3.4 over an absolute number.
+
 Other figures from the same run:
 
 ```
@@ -183,9 +188,10 @@ measure the *machinery* — DMA refill, resampling, framing, ring — not sound.
   Msteps/s), followed by register moves and branches. Plain ALU dispatch is not
   the bottleneck.
 - **BIOS POST is dominated by waiting, not by execution.** 3.86 M steps in
-  2.6 s is ~1.5 Msteps/s, and `vga step` accounts for 83% of wall time — the
-  guest is halted waiting on the emulated clock while the VGA device keeps being
-  serviced. This is why the headline "instructions/sec" over a whole run is
+  2.6 s is ~1.5 Msteps/s, and `vga step` accounted for 74–83% of wall time —
+  the guest is halted waiting on the emulated clock while the VGA device keeps
+  being serviced. §3.4 explains what that turned out to cost and what was done
+  about it. This is why the headline "instructions/sec" over a whole run is
   misleading and why the report prints the payload steady-state figure
   separately. It is also a real observation about the CX: **POST time is set by
   timing/halt behaviour, not by raw interpreter speed**, so it is not something
@@ -195,7 +201,94 @@ measure the *machinery* — DMA refill, resampling, framing, ring — not sound.
   quantised. Phases here are large enough that this is a sub-1% effect, except
   for phase 4 (single batch).
 
-### 3.3 A non-finding worth recording
+### 3.4 The measured cost of redrawing nothing (optimised)
+
+`vga step` was the largest single term in every profile taken before this
+change: 74–83% of wall time, against 14% for the interpreter. That is a
+surprising thing for a display device to cost, so it was measured rather than
+assumed.
+
+**What the guest was actually doing.** The benchmark payload never leaves text
+mode, so every refresh went through `vga_text_refresh()`, which walks all
+`width * height` character cells — 80 x 25 = 2000 — and compares each one against
+a cached copy to find the ones that changed. A counter placed in that loop
+settled it:
+
+```
+probe: refresh=600000 mode=1 text_tr=599999 cells=1199998000 dirty=604088
+```
+
+600 000 refreshes examined **1 200 million** cells and found **604 thousand**
+dirty. 99.95% of the work was spent confirming that a screen nobody was looking
+at had not changed. The dirty count was also revealing in itself: exactly one
+cell per refresh, because the cursor cell was excluded from the cache test and
+so was re-blitted on every single poll (133 ms is the blink period, but the
+underlined cell was being redrawn ~300 000 times a second, not 7).
+
+**Why the refresh rate was what it was.** `vga_step()` advances the retrace
+phase per poll and returns "redraw" on every third poll, so the refresh rate is
+`3 / poll interval` and not a chosen frame rate at all. On a halted guest a poll
+costs almost nothing, so the poll rate goes to the CPU's limit and the refresh
+rate goes with it. That is the same shape as the POST profile in §3.2: the
+device was being serviced as fast as the machine could service it, because
+nothing in the design said not to be.
+
+**What changed** (`source/winspire/vga.c`):
+
+1. `raster_content_gen` is a counter bumped by every guest VRAM store
+   (`vga_mem_write`, `_write16`, `_write32`, `_write_string`), every VGA and VBE
+   register write, `vga_set_force_8dm()`, and the mode/font reset. If it has not
+   moved, no pixel on screen can differ. A refresh that sees it unchanged returns
+   before rebuilding the attribute palette and before touching a character cell.
+2. The cursor cell stopped being excluded from the cache test. It is
+   invalidated explicitly when the blink phase toggles and when the cursor moves
+   (it already was on a move), so the underline still appears and disappears, at
+   the 133 ms rate it is supposed to have.
+
+**Measured, three runs of the same binary each way, same host:**
+
+| | before | after |
+|---|---|---|
+| `vga redraw regions` | 842 220 | **25** |
+| `vga step`, share of wall | 74.3% | **16.6%** |
+| `cpu step`, share of wall | 14.6% | 36.0% |
+| `pc_step` calls per run | 2 526 659 | 10 999 035 |
+| `instructions/sec` (headline) | 8.69 MIPS | 8.70 MIPS |
+| payload steady-state | 102.6 Msteps/s | 104.5 Msteps/s |
+
+**Reading this table honestly.** The two throughput figures at the bottom did not
+move, and they were not expected to: the payload issues one poll per 65 536
+instructions, so the renderer is ~0.001% of that phase, and the headline
+`instructions/sec` is pinned by a fixed 2.6 s POST timer wait (§3.2). The change
+is not visible in either, and any claim that it "raised the frame rate" would be
+unsupported. What it did is cut the VGA device path from three quarters of the
+profile to a sixth, and in exchange the loop now completes **4.35x more poll
+cycles per second** (10 999 035 / 2.8 s against 2 526 659 / 2.8 s) during exactly
+the phase where the guest is halted. Those cycles are the ones that re-arm the
+PIT, deliver the timer interrupt and service the bridge, so the win is lower
+timer-interrupt latency and more headroom for the device layer, not a faster
+interpreter.
+
+Of the 16.6% that remains, about 3.5 points are the host's own
+`clock_gettime` — measured by substituting a cached value for `get_uticks()` in
+the refresh path, which dropped `vga step` to 13.2% — and most of the remainder
+is the harness's own timing overhead, because `vga_ns` is measured as
+`host_ns() - t0` and therefore includes the cost of the `host_ns()` call that
+closes the interval. **On the CX this residual does not exist in the same form:
+`get_uticks()` there returns a plain `guest_ticks` global rather than reading the
+clock.** So the honest claim for the target is that the text-refresh path is now
+close to free per poll, not that it is 16.6% of anything.
+
+**Correctness.** The rendered output must not change, only how often it is
+produced. `--screen` was added to the host harness for exactly this: it dumps the
+character cells straight out of emulated VRAM. Captured at the end of a
+`--boot build/bench/bench386.img` run, the full 80x25 SeaBIOS POST screen
+(version banner, "Press ESC for boot menu.", "Booting from Floppy...") and the
+`snapshot signature: 0x177104f5` are **byte-identical before and after**. All
+three CX profiles still build warning-free under the cross toolchain and
+`check_cx_frontend.sh` is clean.
+
+### 3.5 A non-finding worth recording
 
 `lpgno % tlb_size` appears in the TLB lookup path. On ARM926EJ-S an integer
 modulo by a *variable* is a library call costing tens of cycles, so this would
@@ -209,15 +302,22 @@ with the same reasoning documented in place.
 
 ## 4. Optimisation status
 
-Honest summary: **the measurement infrastructure is the deliverable here, not a
-pile of speculative micro-optimisation.**
+Honest summary: **the measurement infrastructure was the deliverable of the
+first pass, and §3.4 is the first optimisation it paid for.**
 
 The brief says "always optimise measured bottlenecks". The prerequisite for that
 is having a bottleneck measurement that is trustworthy, deterministic, and
-resistant to the three silent-garbage bugs listed in §2.2. That now exists, and
-it is what anyone continuing this work should use.
+resistant to the three silent-garbage bugs listed in §2.2. That exists, and it
+is what anyone continuing this work should use.
 
-What was deliberately *not* done, and why:
+What has been optimised, on measurement:
+
+- **Text-mode refresh no longer rescans a static screen** (§3.4). This was the
+  single largest term in the profile at 74% of wall time, and it was pure waste:
+  99.98% of the character cells it examined were provably unchanged. It is now a
+  single counter comparison.
+
+What is deliberately *still not* done, and why:
 
 - **No speculative interpreter rewrites.** Without profiling on ARM926 (no
   `perf`, no hardware), changing the dispatch structure would be optimising for
@@ -225,6 +325,12 @@ What was deliberately *not* done, and why:
   no branch predictor to speak of, a 16 KiB I-cache, limited load/store units,
   and no divide. A change tuned on x86-64 could easily be a regression on the
   CX.
+- **No retuning of `TINY386_PC_STEP_COUNT`.** The text-renderer fix removed most
+  of the per-poll cost that a smaller batch was paying for, which makes a larger
+  batch more attractive — but the batch size is currently chosen from
+  guest-clock arithmetic, and the crossover is a property of ARM926 timings that
+  only hardware can report. Retuning it blind would be the same mistake as a
+  speculative interpreter rewrite, just at a different level.
 - **No lazy-flag or register-caching changes.** These touch x86 *correctness*
   (`EFLAGS`, segment state, paging). The brief is explicit that correctness is
   not negotiable for benchmark numbers, and there is no way to validate them

@@ -86,8 +86,75 @@ which is exactly its purpose.
 Measured: **~80 M emulator steps/s** steady state, reproducible within ~4%.
 Full numbers in [PERFORMANCE.md](PERFORMANCE.md).
 
+The harness also has a `--screen` mode that dumps the emulated text screen
+straight out of VRAM. It exists so that a change to the renderer can be proved
+output-identical without a calculator; it is what the text-refresh optimisation
+in [PERFORMANCE.md](PERFORMANCE.md) §3.4 was verified with.
+
 The loop also drives the PC audio path (`pc_audio_step()`) and the ESP32 bridge
 the same way the calculator frontend does, and reports both. See §7.
+
+### 4a. Text-mode refresh — **optimised on measurement**, output verified
+**identical**
+
+The VGA device path was the largest term in the host profile at 74–83% of wall
+time. It was being spent re-examining all 2000 character cells of a text screen
+on every retrace poll to discover that none of them had changed: 1.2 billion cell
+comparisons for 604 000 dirty cells, and the cursor cell re-blitted on every
+poll instead of on every blink.
+
+`source/winspire/vga.c` now skips the scan entirely when a counter bumped by
+every VRAM store and every VGA/VBE register write says no pixel can differ, and
+caches the cursor cell like any other. Measured over three runs each way:
+redraw regions 842 220 -> **25**, `vga step` 74.3% -> **16.6%** of wall, and
+**4.35x more poll cycles per second** during BIOS POST (where the guest is
+halted and those cycles are what re-arm the PIT and deliver the timer IRQ). The
+headline `instructions/sec` did not move and is not claimed to have: POST is a
+fixed 2.6 s timer wait. The rendered SeaBIOS POST screen and its snapshot
+signature are byte-identical before and after; all three profiles build
+warning-free and `check_cx_frontend.sh` is clean.
+
+### 4b. Original-CX display orientation — **fixed**, output **unverified on hardware**
+
+The original CX drew the whole screen **vertically mirrored**. Root cause:
+TI-Nspire OS draws from a bottom-left origin (y increasing upward), so the
+framebuffer behind `REAL_SCREEN_BASE_ADDRESS` stores scanline 0 at the **bottom**
+of the panel. The VGA core produces a conventional top-down surface, and
+`panel_blit()` handed it straight to `lcd_blit()`, so every row landed one
+scanline off and the image appeared upside down.
+
+This is specific to the original CX. A CX II / revision W+ panel is mounted
+rotated: its MADCTL is `0x28` with the row/column-exchange bit set, and
+`sc_nl_lcd_type()` reports `SCR_240x320_565`, so `rotate_surface()` transposes
+the surface and the exchange bit puts scanline 0 back at the top. The original
+CX has MADCTL `0x08` and no exchange, which is why it needed the correction and
+the CX II path did not.
+
+`source/winspire-ndless/main.c` now flips the guest surface vertically on the
+**non-rotated** path only (`flip_surface_vertical()`, plus the matching row
+remap in the `draw_region()` partial-update path, which bypasses
+`panel_blit()`). `WINSPIRE_PANEL_ROTATE_CCW` is unchanged: it selects a
+rotation *direction* and cannot correct a mirror, so the comment that
+previously told users to flip it for a mirrored image was wrong and is fixed.
+
+Verified: type-check clean on all three profiles; all three `.tns` build
+warning-free and pass `genzehn`; a standalone check confirms the full-frame
+flip and the partial-update band mapping each put the right guest row on the
+right scanline, and that the previous code wrote guest row 139 where row 100
+belonged; `flip_surface_vertical` is present in the linked ARM binary with the
+expected backwards-walking row loop.
+
+**Not verified:** no calculator was available, so the corrected orientation has
+never been observed. The diagnosis is derived from the OS coordinate
+convention and the MADCTL values in the Ndless sources, not from hardware. If
+a unit comes out correct but unmirrored, revert `flip_surface_vertical()` - it
+is one self-contained block.
+
+Two earlier claims about this symptom were wrong and are recorded here so they
+are not repeated: `lcd_init(SCR_320x240_565)` is correct (the `return false`
+for `SCR_240x320_565` is a pre-r2004 branch this build never reaches, and
+`assert_ndless_rev(2004)` is enforced), and both `rotate_surface()` branches
+are correct 90° rotations rather than reflections.
 
 ### 5. cxlink protocol, Nspire-side bridge, and the guest DHCP server —
 **typechecked**, with an **executable self test** for both
@@ -255,10 +322,13 @@ All three profiles build here with zero warnings (`make cx`, `make cx-release`,
 `make cx-debug`):
 
 ```
-nspire95-cx.tns          381252 bytes   TURBO
-nspire95-cx-release.tns  361956 bytes   RELEASE
-nspire95-cx-debug.tns    335212 bytes   DEBUG
+nspire95-cx.tns          382240 bytes   TURBO
+nspire95-cx-release.tns  362944 bytes   RELEASE
+nspire95-cx-debug.tns    335984 bytes   DEBUG
 ```
+
+(Sizes as of the v1.0.1 release. The text-refresh optimisation in §4a adds
+~200–500 bytes per profile.)
 
 What is verified about them:
 
