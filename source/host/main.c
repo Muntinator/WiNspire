@@ -575,6 +575,13 @@ static uint16_t phase_word(PC *pc)
 static void dump_text_screen(PC *pc);
 
 /*
+ * Row stride the snapshot buffer is filled with. It is a buffer layout, not
+ * a screen property: the reported width is whatever the guest programmed,
+ * which is 80 here and something else on a mode the guest selects later.
+ */
+#define TEXT_STRIDE 256
+
+/*
  * Print the emulated VGA text screen straight out of the emulated card.
  *
  * This is the only direct evidence of what the BIOS and the boot loader
@@ -585,6 +592,15 @@ static void dump_text_screen(PC *pc);
  */
 static void dump_text_screen(PC *pc)
 {
+	/*
+	 * TEXT_STRIDE, not the reported width, is the row stride the buffer
+	 * was filled with: vga_get_text_snapshot() always writes max_cols
+	 * characters per row, padding out to it. Indexing the printout by the
+	 * reported width instead walked off the start of each row and
+	 * interleaved fragments of neighbouring rows, which rendered the
+	 * SeaBIOS POST screen as half-dubled text with words split across
+	 * two lines.
+	 */
 	static char text[64 * 256];
 	int rows = 0;
 	int cols = 0;
@@ -592,8 +608,8 @@ static void dump_text_screen(PC *pc)
 	int got;
 	int r;
 
-	got = vga_get_text_snapshot(pc->vga, text, 64, 256, &rows, &cols,
-				   &signature);
+	got = vga_get_text_snapshot(pc->vga, text, 64, TEXT_STRIDE, &rows,
+				   &cols, &signature);
 	if (!got) {
 		printf("\n== VGA text screen ==\n");
 		printf("(not in a text mode at the end of the run)\n");
@@ -602,7 +618,7 @@ static void dump_text_screen(PC *pc)
 	printf("\n== VGA text screen (%dx%d, signature %08x) ==\n",
 	       cols, rows, signature);
 	for (r = 0; r < rows; r++)
-		printf("|%.*s|\n", cols, text + r * cols);
+		printf("|%.*s|\n", cols, text + r * TEXT_STRIDE);
 }
 
 static int run_benchmark(PC *pc, HostDisplay *display, const BenchOptions *opts)
@@ -720,6 +736,16 @@ static int run_benchmark(PC *pc, HostDisplay *display, const BenchOptions *opts)
 		uint64_t elapsed = host_ns() - started;
 		double seconds = ns_to_seconds(elapsed);
 		double ips = seconds > 0.0 ? (double)instructions / seconds : 0.0;
+
+		/*
+		 * Sampled here, after the run, not before it. Called before
+		 * emulation it can only ever see the power-on state, which is
+		 * why it used to report "not in a text mode" for every run
+		 * including ones where SeaBIOS had plainly reached its POST
+		 * screen - the sample was simply taken too early to see it.
+		 */
+		if (opts->dump_screen)
+			dump_text_screen(pc);
 
 		printf("\n== emulation throughput ==\n");
 		printf("instructions      : %llu\n",
@@ -958,9 +984,6 @@ int main(int argc, char **argv)
 		 */
 		*(volatile uint16_t *)(pc->phys_mem + PHASE_WORD_ADDR) = 0xFFFF;
 	}
-
-	if (opts.dump_screen)
-		dump_text_screen(pc);
 
 	{
 		int result = run_benchmark(pc, &display, &opts);

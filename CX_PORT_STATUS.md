@@ -399,6 +399,76 @@ first `pc_step`; that is what the first hardware session is for. The DEBUG
 build and the unstripped `nspire95-cx.elf` (kept in `build/CX/`) exist for
 that session.
 
+### 4c. SeaBIOS with no boot media — **investigated, and it was never broken**
+
+This was reported as "the emulator stalls in POST at 0.10 MIPS and never
+reaches a text mode". It does not stall, and it does reach a text mode. What
+was measured:
+
+```
+$ build/Host/winspire-host --ini nomedia.ini --bench 20 --seconds 8 --screen
+== VGA text screen (80x25, signature 1b84c5b8) ==
+|SeaBIOS (version rel-1.17.0-7-g106549a4-dirty-20260327_011027-T001d08132)       |
+|Press ESC for boot menu.                                                        |
+|Booting from Floppy...                                                          |
+|Boot failed: could not read the boot disk                                       |
+|Booting from Hard Disk...                                                       |
+|Boot failed: could not read the boot disk                                       |
+|No bootable device.  Retrying in 60 seconds.                                    |
+```
+
+Instrumenting `pc_step()` shows why the rate looks like a stall: after the
+message above the guest executes `HLT` and waits for the timer, which is what
+SeaBIOS is supposed to do. Across a 75 s run, **100% of `pc_step` calls find
+the CPU halted**, and only **3** of them find it awake. The instruction rate
+therefore measures how long the BIOS spends asleep, not how fast the emulator
+is — a halted guest executes nothing by definition. The wake-ups are real: the
+PIT IRQ fires and the CPU does resume, which is why the instruction count
+climbs from **5.53 M at 8 s to 11.70 M at 75 s** as the 60-second retry comes
+around and the whole boot sequence runs again. Left alone to 140 s the screen
+is unchanged and stable across two full retry cycles.
+
+#### The actual defect this uncovered
+
+`--screen` sampled the VGA **before** `run_benchmark()`, i.e. before a single
+instruction had executed, so it could only ever see the power-on state and
+always printed "not in a text mode at the end of the run" — a message that was
+both wrong and self-contradictory. That is what produced the false report in
+the first place. It now samples after the run, which is the only point where
+there is anything to see.
+
+That fix exposed a second bug hiding behind the first: the snapshot buffer is
+filled with a **256-column** stride but the printout indexed it by the
+reported width (80), so every row was read from the wrong offset and the POST
+screen came out half-doubled with words split across two lines. The stride is
+now a named constant used on both sides.
+
+Neither fix touches emulated hardware — both are in the host harness — and all
+three `.tns` are byte-for-byte the same size as before (339984 / 367764 /
+387060).
+
+#### What this does and does not disturb
+
+The claim in [PERFORMANCE.md](PERFORMANCE.md) §3.4 rests on `--screen` output
+being "byte-identical before and after" the text-refresh optimisation, quoted
+as `snapshot signature: 0x177104f5` for a `--boot build/bench/bench386.img`
+run. That claim is re-verified here against the fixed harness and still holds
+exactly:
+
+```
+== VGA text screen (80x25, signature 177104f5) ==
+|SeaBIOS (version rel-1.17.0-...)                          |
+|Press ESC for boot menu.                                  |
+|Booting from Floppy...                                    |
+```
+
+The signature is computed inside `vga_get_text_snapshot()` over emulated VRAM
+and was never affected by either bug — only the *printing* of it was, and only
+the *timing* of the sample. The three lines that document names are all
+present and correctly spelled, which they were not before this fix. The
+optimisation's correctness claim therefore stands, and is now supported by
+output a reader can actually check rather than by a number alone.
+
 ---
 
 ## Not done, and what it needs
