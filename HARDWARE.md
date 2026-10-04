@@ -46,13 +46,20 @@ Consequences for this port, all implemented in `source/winspire-ndless/main.c`:
   mount and cannot be read from the Ndless API. `WINSPIRE_PANEL_ROTATE_CCW`
   selects it and must be set empirically on hardware. This is a rotation
   choice only.
-- The original CX (MADCTL `0x08`, no row/column exchange) scans its framebuffer
-  **bottom-up**: TI-Nspire OS draws from a bottom-left origin, so scanline 0 is
-  the bottom of the panel. The VGA core produces a top-down surface, so the
-  frontend flips it vertically before presenting (`flip_surface_vertical()` in
-  `source/winspire-ndless/main.c`). A transposed panel does not need this -
-  its row/column exchange puts scanline 0 back at the top - which is why the
-  flip is keyed on `!rotated_panel` and not applied to both.
+- The original CX (MADCTL `0x08`, no row/column exchange) presents a linear
+  surface **rotated 180 degrees**. This is measured, not assumed: v1.0.0/1
+  applied no correction and was reported "upside down", and v1.0.2/3 applied a
+  vertical flip and produced a left-right mirror. A vertical flip composed with
+  a 180-degree rotation is exactly a horizontal mirror, so both reports are
+  satisfied by one panel transform and the correction has to be a full 180
+  degrees - rows *and* columns (`rotate_surface_180()` in
+  `source/winspire-ndless/main.c`). A transposed panel does not need this,
+  which is why it is keyed on `!rotated_panel` and not applied to both.
+- Note that the TI-Nspire OS's bottom-left drawing origin is **not** evidence
+  about fill order: it describes how the OS issues drawing commands, not the
+  order in which `lcd_blit()` writes panel memory. An earlier version inferred
+  a bottom-up scan order from it and corrected only the vertical axis; that is
+  the mistake that produced the mirror. See `CX_PORT_STATUS.md` §4b.
 
 ### 1.2 CPU speed control
 
@@ -209,7 +216,7 @@ that an ESP32 is providing the physical network connection" requires.
    grayscale Clickpad/Touchpad.
 2. Note the hardware revision — a 240x320 panel means revision W or later, and
    `WINSPIRE_PANEL_ROTATE_CCW` may need flipping. The original CX needs no
-   such choice: its vertical flip is handled in the frontend.
+   such choice: its 180-degree rotation is handled in the frontend.
 3. Check J01 is populated before soldering an ESP32 to it.
 4. Have Ndless installed and note its revision (`assert_ndless_rev(2004)`).
 5. Have `disk.img.tns`, `bios.bin.tns`, `vgabios.bin.tns` and

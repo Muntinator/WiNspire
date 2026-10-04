@@ -140,7 +140,7 @@ static bool detect_hardware(void)
 typedef struct {
 	u8 *framebuffer;
 	uint16_t *rotate_buffer; /* only allocated for a rotated panel */
-	uint16_t *flip_buffer;   /* only allocated when the panel scans bottom-up */
+	uint16_t *flip_buffer;   /* only allocated when the panel needs correcting */
 	bool ready;
 	bool lcd_active;
 	bool dirty;
@@ -677,7 +677,7 @@ static void draw_frame(Display *display, bool force)
 	display->last_draw_ms = now;
 }
 
-static void flip_surface_vertical(const uint16_t *src, uint16_t *dst);
+static void rotate_surface_180(const uint16_t *src, uint16_t *dst);
 
 static void draw_region(Display *display,
 		int left, int top, int width, int height)
@@ -702,10 +702,10 @@ static void draw_region(Display *display,
 		return;
 	}
 	/*
-	 * The panel scans bottom-up, so guest row r is presented on panel
-	 * row SCREEN_HEIGHT - 1 - r. A partial update therefore has to be
-	 * written to the panel upside down to land on the same physical
-	 * scanlines.
+	 * The panel presents a 180-degree rotated surface, so guest pixel
+	 * (x, y) lands on panel pixel (SCREEN_WIDTH - 1 - x,
+	 * SCREEN_HEIGHT - 1 - y). A partial update has to be written to the
+	 * panel through that same mapping to land on the right pixels.
 	 *
 	 * The band is staged in flip_buffer and then copied out. Both sides
 	 * of that copy have to run in the SAME direction: the staging loop
@@ -715,26 +715,33 @@ static void draw_region(Display *display,
 	 * Starting it at mirror instead, as an earlier version did, read
 	 * height-1 rows that had never been written and presented stale
 	 * pixels, which made the screen unreadable.
+	 *
+	 * The columns reverse too, so the staging copy is per-pixel rather
+	 * than a memcpy: guest column left lands at panel column
+	 * SCREEN_WIDTH - 1 - left, and the band runs backwards from there.
 	 */
 	if (!claim_lcd(display, false, now, NULL))
 		return;
 	if (display->flip_buffer) {
 		int mirror = SCREEN_HEIGHT - 1 - top;
 		int first = mirror - height + 1;
+		int col = SCREEN_WIDTH - left - width;
 
 		for (row = 0; row < height; row++) {
-			memcpy((uint16_t *)
-			       display->flip_buffer +
-			       (size_t)(mirror - row) * SCREEN_WIDTH + left,
-			       (const uint16_t *)
-			       display->framebuffer +
-			       (size_t)(top + row) * SCREEN_WIDTH + left,
-			       (size_t)width * sizeof(uint16_t));
+			const uint16_t *in =
+				(const uint16_t *)display->framebuffer +
+				(size_t)(top + row) * SCREEN_WIDTH + left;
+			uint16_t *out = (uint16_t *)display->flip_buffer +
+				(size_t)(mirror - row) * SCREEN_WIDTH + col;
+			int i;
+
+			for (i = 0; i < width; i++)
+				out[i] = in[width - 1 - i];
 		}
 		source = display->flip_buffer +
-			(size_t)first * SCREEN_WIDTH + left;
+			(size_t)first * SCREEN_WIDTH + col;
 		screen = (uint16_t *)REAL_SCREEN_BASE_ADDRESS +
-			(size_t)first * SCREEN_WIDTH + left;
+			(size_t)first * SCREEN_WIDTH + col;
 	} else {
 		source = (uint16_t *)display->framebuffer +
 			top * SCREEN_WIDTH + left;
@@ -900,9 +907,9 @@ static void restore_os_cursor(uint32_t saved_cursor)
  *
  * WINSPIRE_PANEL_ROTATE_CCW selects which way that transposition runs, for
  * units whose panel is mounted the other way round. It is a mount-direction
- * choice only; it cannot correct a vertical flip, because a mirror is not a
- * rotation. The bottom-up scan order that does need correcting is handled by
- * flip_surface_vertical() below.
+ * choice only; it cannot correct a mirror, because a mirror is not a
+ * rotation. The 180-degree correction the original CX needs is handled by
+ * rotate_surface_180() below.
  */
 static void rotate_surface(const uint16_t *src, uint16_t *dst)
 {
@@ -925,30 +932,49 @@ static void rotate_surface(const uint16_t *src, uint16_t *dst)
 }
 
 /*
- * TI-Nspire OS draws in a Cartesian frame: the origin is the bottom-left of the
- * screen and y increases upward (screen.drawString, gui_gc_fillRect and every
- * other OS drawing entry point take y that way). The framebuffer behind
- * REAL_SCREEN_BASE_ADDRESS therefore stores scanline 0 at the BOTTOM of the
- * panel and climbs from there.
+ * The original CX presents a linear surface rotated by 180 degrees.
  *
- * The VGA core produces a conventional top-down surface: its row 0 is the top
- * scanline. Handing that to lcd_blit() unchanged therefore presents the whole
- * image vertically mirrored on any panel that is not transposed.
+ * This is not an inference from a documentation convention; it is pinned by
+ * two observations on real hardware, which together admit exactly one
+ * transform. Let P be the panel's inherent mapping and Fv a vertical flip:
  *
- * A rotated panel is transposed by rotate_surface() above, and the panel
- * controller's MADCTL row/column-exchange bit then puts scanline 0 back at the
- * top, so that path already needs no flip. The original CX (MADCTL 0x08, no
- * exchange) is the case that has to be corrected here, which is why this is
- * keyed on !rotated_panel rather than applied to both.
+ *   v1.0.0/1 shipped no correction and was reported "upside down", i.e.
+ *       P = R180 (a 180-degree rotation).
+ *   v1.0.2/3 shipped Fv and the screen is horizontally mirrored, i.e.
+ *       Fv . P = Fh.
+ *
+ * Fv . R180 = Fv . Fv . Fh = Fh, so both observations are satisfied by the
+ * single panel transform R180 and by nothing else. The correct correction is
+ * therefore R180 itself: reverse the rows AND the columns.
+ *
+ * An earlier version applied only Fv on the strength of the TI-Nspire OS's
+ * bottom-left drawing origin. That origin describes how the OS issues
+ * drawing commands; it does not describe the order in which lcd_blit() fills
+ * panel memory. Reading it as a scan order was the mistake, and Fv composed
+ * with the panel's real 180-degree rotation left a horizontal mirror - which
+ * is why the earlier "vertical flip" diagnosis produced a left-right mirror
+ * rather than an upright image.
+ *
+ * The calculator's own chrome is unaffected because the OS draws it through
+ * its own path, not through lcd_blit().
+ *
+ * A rotated panel (CX revision W and later, CX II) is transposed by
+ * rotate_surface() above and needs no correction here, which is why this is
+ * keyed on !rotated_panel.
  */
-static void flip_surface_vertical(const uint16_t *src, uint16_t *dst)
+static void rotate_surface_180(const uint16_t *src, uint16_t *dst)
 {
 	int row;
+	int col;
 
-	for (row = 0; row < SCREEN_HEIGHT; row++)
-		memcpy(dst + (size_t)row * SCREEN_WIDTH,
-		       src + (size_t)(SCREEN_HEIGHT - 1 - row) * SCREEN_WIDTH,
-		       (size_t)SCREEN_WIDTH * sizeof(uint16_t));
+	for (row = 0; row < SCREEN_HEIGHT; row++) {
+		const uint16_t *in =
+			src + (size_t)(SCREEN_HEIGHT - 1 - row) * SCREEN_WIDTH;
+		uint16_t *out = dst + (size_t)row * SCREEN_WIDTH;
+
+		for (col = 0; col < SCREEN_WIDTH; col++)
+			out[col] = in[SCREEN_WIDTH - 1 - col];
+	}
 }
 
 static void panel_blit(Display *display)
@@ -964,7 +990,7 @@ static void panel_blit(Display *display)
 		return;
 	}
 	if (display->flip_buffer) {
-		flip_surface_vertical(
+		rotate_surface_180(
 			(const uint16_t *)display->framebuffer,
 			display->flip_buffer);
 		lcd_blit(display->flip_buffer, hw.panel_format);
@@ -1375,13 +1401,14 @@ int main(int argc, char **argv)
 		}
 	} else {
 		/*
-		 * The panel scans bottom-up, so every present needs a flipped
-		 * copy. See flip_surface_vertical().
+		 * The panel presents the surface rotated 180 degrees, so
+		 * every present needs a corrected copy.
+		 * See rotate_surface_180().
 		 */
 		display.flip_buffer = calloc(1, ROTATE_BUFFER_BYTES);
 		if (!display.flip_buffer) {
 			snprintf(boot_error, sizeof(boot_error),
-				 "Not enough free RAM for the panel flip buffer.\n"
+				 "Not enough free RAM for the panel rotation buffer.\n"
 				 "Lower mem_size in %s.", config_path);
 			free(display.framebuffer);
 			display.framebuffer = NULL;
