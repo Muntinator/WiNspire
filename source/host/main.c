@@ -40,6 +40,7 @@
 #include "pc.h"
 #include "ini.h"
 #include "cxlink.h"
+#include "input_selftest.h"
 #include "bridge_net.h"
 
 #ifndef BPP
@@ -506,6 +507,13 @@ typedef struct {
  */
 static int run_selftest(void)
 {
+	if (!input_selftest()) {
+		fprintf(stderr, "input self test: FAIL at input_selftest.c:%d\n",
+			input_selftest_failure_line);
+		return 1;
+	}
+	printf("input self test: PASS (F1-F15 via the Fn chord, Ctrl/Alt, "
+	       "no stuck keys)\n");
 	if (!cxlink_selftest()) {
 		fprintf(stderr, "cxlink self test: FAIL at cxlink.c:%d\n",
 			cxlink_selftest_failure_line);

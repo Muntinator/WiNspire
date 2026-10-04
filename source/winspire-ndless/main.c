@@ -9,6 +9,7 @@
 
 #include "pc.h"
 #include "cxlink.h"
+#include "keymap.h"
 
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
@@ -55,6 +56,25 @@
 #define KEY_APOSTROPHE 0x34
 #define KEY_ASTERISK 0x33
 #define KEY_ALT 58
+/*
+ * PC set-1 scancodes for the function keys. F13-F15 are E0-prefixed, and
+ * ps2_put_keycode() takes them as 0xe0xx.
+ */
+#define SCAN_F1 0x3b
+#define SCAN_F2 0x3c
+#define SCAN_F3 0x3d
+#define SCAN_F4 0x3e
+#define SCAN_F5 0x3f
+#define SCAN_F6 0x40
+#define SCAN_F7 0x41
+#define SCAN_F8 0x42
+#define SCAN_F9 0x43
+#define SCAN_F10 0x44
+#define SCAN_F11 0x57
+#define SCAN_F12 0x58
+#define SCAN_F13 0xe068
+#define SCAN_F14 0xe069
+#define SCAN_F15 0xe06a
 /*
  * Panel orientation corrections. ORIENT_FLIP_V reverses the rows and
  * ORIENT_FLIP_H the columns, so ORIENT_ROT_180 is both. See the comment on
@@ -179,12 +199,6 @@ typedef struct {
 static void panel_blit(Display *display);
 
 typedef struct {
-	const t_key *key;
-	int keycode;
-	bool is_pressed;
-} KeyBinding;
-
-typedef struct {
 	bool has_position;
 	uint16_t last_x;
 	uint16_t last_y;
@@ -211,7 +225,25 @@ static uint32_t input_poll_loops = INPUT_POLL_LOOPS;
 static uint32_t video_poll_loops = VIDEO_POLL_LOOPS;
 static int orientation = ORIENT_DEFAULT;
 static bool orientation_marker;
+static bool fn_mode;
+
+/*
+ * The Fn chord: Ctrl and Alt held together.
+ *
+ * Ctrl alone and Alt alone keep their ordinary meanings, so this cannot
+ * collide with a guest shortcut - the chord only engages when both are down,
+ * and Ctrl+Alt on its own is not a shortcut Windows 95 binds to anything. It
+ * is the only combination available: the CX has no dedicated Fn or function
+ * key to spare.
+ */
+static bool fn_mode_active(void)
+{
+	return isKeyPressed(KEY_NSPIRE_CTRL) &&
+	       isKeyPressed(KEY_NSPIRE_MENU);
+}
 static volatile bool mode_changed;
+/* Defined below; i386.c declares its own copy of this prototype. */
+void nspire_log(const char *fmt, ...);
 static TouchState touchpad_state;
 
 static bool is_power_of_two(uint32_t value)
@@ -235,76 +267,6 @@ static int parse_native_config(void *user, const char *section,
 	}
 	return parse_conf_ini(user, section, name, value);
 }
-
-/*
- * Map physical Nspire keys to Linux input keycodes. The shared PS/2 layer
- * converts navigation keys to E0-prefixed PC set-1 scancodes. Touchpad arrow
- * zones use the same keycodes.
- */
-static KeyBinding keys[] = {
-	{ &KEY_NSPIRE_ESC, 1, false },
-	{ &KEY_NSPIRE_1, 2, false },
-	{ &KEY_NSPIRE_2, 3, false },
-	{ &KEY_NSPIRE_3, 4, false },
-	{ &KEY_NSPIRE_4, 5, false },
-	{ &KEY_NSPIRE_5, 6, false },
-	{ &KEY_NSPIRE_6, 7, false },
-	{ &KEY_NSPIRE_7, 8, false },
-	{ &KEY_NSPIRE_8, 9, false },
-	{ &KEY_NSPIRE_9, 10, false },
-	{ &KEY_NSPIRE_0, 11, false },
-	{ &KEY_NSPIRE_MINUS, 12, false },
-	{ &KEY_NSPIRE_EQU, 13, false },
-	{ &KEY_NSPIRE_DEL, 14, false },
-	{ &KEY_NSPIRE_TAB, 15, false },
-	{ &KEY_NSPIRE_Q, 16, false },
-	{ &KEY_NSPIRE_W, 17, false },
-	{ &KEY_NSPIRE_E, 18, false },
-	{ &KEY_NSPIRE_R, 19, false },
-	{ &KEY_NSPIRE_T, 20, false },
-	{ &KEY_NSPIRE_Y, 21, false },
-	{ &KEY_NSPIRE_U, 22, false },
-	{ &KEY_NSPIRE_I, 23, false },
-	{ &KEY_NSPIRE_O, 24, false },
-	{ &KEY_NSPIRE_P, 25, false },
-	{ &KEY_NSPIRE_ENTER, 28, false },
-	{ &KEY_NSPIRE_CTRL, 29, false },
-	{ &KEY_NSPIRE_A, 30, false },
-	{ &KEY_NSPIRE_S, 31, false },
-	{ &KEY_NSPIRE_D, 32, false },
-	{ &KEY_NSPIRE_F, 33, false },
-	{ &KEY_NSPIRE_G, 34, false },
-	{ &KEY_NSPIRE_H, 35, false },
-	{ &KEY_NSPIRE_J, 36, false },
-	{ &KEY_NSPIRE_K, 37, false },
-	{ &KEY_NSPIRE_L, 38, false },
-	{ &KEY_NSPIRE_SHIFT, 42, false },
-	{ &KEY_NSPIRE_Z, 44, false },
-	{ &KEY_NSPIRE_X, 45, false },
-	{ &KEY_NSPIRE_C, 46, false },
-	{ &KEY_NSPIRE_V, 47, false },
-	{ &KEY_NSPIRE_B, 48, false },
-	{ &KEY_NSPIRE_N, 49, false },
-	{ &KEY_NSPIRE_M, 50, false },
-	{ &KEY_NSPIRE_COMMA, 51, false },
-	{ &KEY_NSPIRE_PERIOD, 52, false },
-	{ &KEY_NSPIRE_DIVIDE, 53, false },
-	{ &KEY_NSPIRE_VAR, KEY_SEMICOLON, false },
-	{ &KEY_NSPIRE_MULTIPLY, KEY_ASTERISK, false },
-	{ &KEY_NSPIRE_APOSTROPHE, KEY_APOSTROPHE, false },
-	{ &KEY_NSPIRE_SPACE, 57, false },
-	/*
-	 * The CX has no Alt key at all, and Windows 95 needs one for every
-	 * menu mnemonic and for Alt+Tab, so the hardware "menu" key - which
-	 * has no other use in a PC guest - stands in for it.
-	 */
-	{ &KEY_NSPIRE_MENU, KEY_ALT, false },
-	{ &KEY_NSPIRE_HOME, 102, false },
-	{ &KEY_NSPIRE_UP, 103, false },
-	{ &KEY_NSPIRE_LEFT, 105, false },
-	{ &KEY_NSPIRE_RIGHT, 106, false },
-	{ &KEY_NSPIRE_DOWN, 108, false },
-};
 
 /* Derive guest time from CPU cycles so host stalls do not cause timer jumps. */
 uint32_t get_uticks(void)
@@ -1093,6 +1055,65 @@ static void draw_orientation_marker(uint16_t *surface, int op)
 	}
 }
 
+/*
+ * A solid block in the top-left corner while the Fn layer is held.
+ *
+ * Without it there is no way to tell F1 from "1": the layer is entered by a
+ * chord that produces no feedback of its own, and a mistyped digit in a
+ * Windows 95 dialog is very hard to diagnose without one.
+ */
+static void draw_fn_indicator(uint16_t *surface)
+{
+	int y;
+	int x;
+
+	for (y = 0; y < 10; y++)
+		for (x = 0; x < 10; x++)
+			surface[(size_t)y * SCREEN_WIDTH + x] = 0xFFFF;
+}
+
+/*
+ * DEBUG-profile status overlay: two bars encoding the active orientation, and
+ * a filled square whenever the Fn layer is held.
+ *
+ * The bars are binary, so a photograph names the setting without anyone having
+ * to trust a legend: bar 1 is the ORIENT_FLIP_V bit (top-bottom) and bar 2 is
+ * ORIENT_FLIP_H (left-right). Reading them off the screen tells us both which
+ * setting is live and whether the INI value reached the emulator at all -
+ * which is exactly what could not be established from outside hardware.
+ */
+static void draw_status_overlay(uint16_t *surface)
+{
+	int bit;
+
+#ifdef WINSPIRE_PROFILE_DEBUG
+	for (bit = 0; bit < 2; bit++) {
+		int row;
+		int col;
+
+		if (!(orientation & (1 << bit)))
+			continue;
+		for (row = 0; row < 8; row++) {
+			for (col = 0; col < 40; col++)
+				surface[(size_t)(14 + bit * 12 + row) *
+					SCREEN_WIDTH + col] = 0xFFFF;
+		}
+	}
+	if (fn_mode) {
+		int row;
+		int col;
+
+		for (row = 40; row < 60; row++)
+			for (col = 0; col < 20; col++)
+				surface[(size_t)row * SCREEN_WIDTH + col] =
+					0xFFFF;
+	}
+#else
+	(void)bit;
+	(void)surface;
+#endif
+}
+
 static void panel_blit(Display *display)
 {
 	if (!display->framebuffer)
@@ -1111,6 +1132,9 @@ static void panel_blit(Display *display)
 		if (orientation_marker)
 			draw_orientation_marker(display->flip_buffer,
 						orientation);
+		if (fn_mode)
+			draw_fn_indicator(display->flip_buffer);
+		draw_status_overlay(display->flip_buffer);
 		lcd_blit(display->flip_buffer, hw.panel_format);
 		return;
 	}
@@ -1244,22 +1268,103 @@ static void poll_touchpad_mouse(PC *pc)
 
 static void poll_keys(PC *pc)
 {
+	bool fn;
 	unsigned int index;
 
+#ifdef WINSPIRE_PROFILE_DEBUG
+	/*
+	 * The D-pad centre button is otherwise unused, so in the DEBUG
+	 * profile it cycles the orientation live. Reinstalling a binary per
+	 * guess is the loop this exists to break: with the value on screen,
+	 * one photo settles which setting the unit needs.
+	 */
+	{
+		static bool click_was;
+
+		bool click = isKeyPressed(KEY_NSPIRE_CLICK);
+
+		if (click && !click_was) {
+			orientation = (orientation + 1) & ORIENT_ROT_180;
+			/* mode_changed forces the next present to redraw. */
+			mode_changed = true;
+			nspire_log("orientation set to %d by D-pad\n",
+				   orientation);
+		}
+		click_was = click;
+	}
+#endif
+	fn = fn_mode_active();
+	/*
+	 * Switching layers has to release whatever the other layer was
+	 * holding, or the guest sees a key stuck down: entering Fn mode means
+	 * Ctrl and Alt are modifiers rather than keys, so any Ctrl/Alt the
+	 * guest was told about a moment ago must be retracted.
+	 */
+	if (fn != fn_mode) {
+		for (index = 0;
+		     index < WINSPIRE_KEYMAP_COUNT; index++) {
+			bool *held = fn ? &keymap[index].is_pressed
+					: &keymap[index].fn_pressed;
+			int code = fn ? keymap[index].keycode
+				      : keymap[index].fn_keycode;
+
+			if (*held && code) {
+				ps2_put_keycode(pc->kbd, 0, code);
+				*held = false;
+			} else if (*held) {
+				*held = false;
+			}
+		}
+		fn_mode = fn;
+	}
 	for (index = 0;
-	     index < sizeof(keys) / sizeof(keys[0]); index++) {
+	     index < WINSPIRE_KEYMAP_COUNT; index++) {
 		bool is_pressed;
+		bool *held;
+		int code;
 
 		/* Touchpad arrow zones are reported separately by poll_touchpad_mouse. */
 		if (is_touchpad &&
-		    keys[index].key->tpad_arrow != TPAD_ARROW_NONE)
+		    keymap[index].key->tpad_arrow != TPAD_ARROW_NONE)
 			continue;
-		is_pressed = isKeyPressed(*keys[index].key);
-		if (is_pressed == keys[index].is_pressed)
+		if (fn) {
+			/*
+			 * In the Fn layer the chord keys themselves are
+			 * modifiers and emit nothing, and a key with no Fn
+			 * meaning is simply inert.
+			 */
+			if (keymap[index].fn_keycode == 0)
+				continue;
+			code = keymap[index].fn_keycode;
+			held = &keymap[index].fn_pressed;
+		} else {
+			code = keymap[index].keycode;
+			held = &keymap[index].is_pressed;
+		}
+		is_pressed = isKeyPressed(*keymap[index].key);
+		if (fn) {
+			/*
+			 * Claim the key for the Fn layer. Without this,
+			 * letting go of the chord while the key is still
+			 * held makes the normal layer see it as a fresh
+			 * press and type "5" right after F5 was sent.
+			 */
+			if (is_pressed && !*held)
+				keymap[index].fn_consumed = true;
+		} else if (keymap[index].fn_consumed) {
+			/*
+			 * Fn already used this key. Stay quiet until it
+			 * is physically released, then forget it.
+			 */
+			if (is_pressed)
+				continue;
+			keymap[index].fn_consumed = false;
 			continue;
-		keys[index].is_pressed = is_pressed;
-		ps2_put_keycode(pc->kbd, is_pressed,
-			       keys[index].keycode);
+		}
+		if (is_pressed == *held)
+			continue;
+		*held = is_pressed;
+		ps2_put_keycode(pc->kbd, is_pressed, code);
 	}
 }
 
@@ -1360,8 +1465,8 @@ static void reset_input_state(void)
 	unsigned int index;
 
 	for (index = 0;
-	     index < sizeof(keys) / sizeof(keys[0]); index++)
-		keys[index].is_pressed = false;
+	     index < WINSPIRE_KEYMAP_COUNT; index++)
+		keymap[index].is_pressed = false;
 	memset(&touchpad_state, 0, sizeof(touchpad_state));
 }
 
@@ -1448,6 +1553,22 @@ int main(int argc, char **argv)
 		return startup_error(&config, boot_error);
 	}
 	guest_hz = config.clock_hz;
+#if defined(WINSPIRE_PROFILE_DEBUG)
+	/*
+	 * Record what the panel and the configuration actually resolved to.
+	 * Whether the INI on the calculator is being read at all cannot be
+	 * established from outside the hardware, and if it is not, no value
+	 * of `orientation` would ever change anything - which is exactly
+	 * what repeated reinstalls would look like.
+	 */
+	nspire_log("lcd_type=%d (320x240=%d) rotated_panel=%d\n",
+		   (int)hw.panel_format, !hw.rotated_panel,
+		   hw.rotated_panel ? 1 : 0);
+	nspire_log("config=%s orientation=%d (0 none,1 top-bottom,"
+		   "2 left-right,3 rotate180) marker=%d\n",
+		   config_path, orientation,
+		   orientation_marker ? 1 : 0);
+#endif
 	if (config.mem_size < GUEST_RAM_MIN || config.mem_size > GUEST_RAM_MAX) {
 		snprintf(boot_error, sizeof(boot_error),
 			 "mem_size must be between %ldM and %ldM in %s.",

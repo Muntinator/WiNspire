@@ -83,5 +83,13 @@ for source in "${core_sources[@]}"; do
 	objects+=("$object")
 done
 
+# The input self test lives beside the frontend rather than in source/winspire
+# because it is only meaningful on a host: it stands in for the calculator's
+# keypad and touchpad, which do not exist here. It links the real i8042.c, so
+# the scancodes it checks are the ones the guest actually receives.
+"$cc" "${common_flags[@]}" -I"$repo/source/ndless-stub/include" -I"$repo/source/winspire-ndless" -c "$repo/source/host/input_selftest.c" \
+	-o "$work/obj/input_selftest.o"
+objects+=("$work/obj/input_selftest.o")
+
 "$cc" "${objects[@]}" -o "$out/winspire-host" -Wl,--gc-sections -lm
 echo "built $out/winspire-host"

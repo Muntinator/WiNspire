@@ -220,11 +220,47 @@ Mapped to PC set-1 scancodes through the emulated 8042/PS/2 controller.
 | `Del` | Backspace |
 | `Home` | Home |
 | arrows | arrows |
+| `'` | `'` |
+| `Multiply` | `*` |
+| `Menu` | **`Alt`** |
 
-`Alt` and the PC function keys are not reachable from the Nspire keypad — that
-is a physical limitation, not a gap in the mapping. Games and applications that
-require `Alt` (for example `Alt+Tab` or `Alt+F4`) cannot be driven from the
-calculator alone.
+### The Fn chord — F1 to F15
+
+The CX keypad has **no function keys at all**, and Windows 95 uses them: `F1` for
+Help, `Shift+F5` to refresh a folder, `Ctrl+F4` to close a window. They are
+reached with the **Fn chord: hold `Ctrl` and `Menu` (Alt) together**, then press
+a key:
+
+| While holding `Ctrl`+`Menu` | Sends |
+|---|---|
+| `1` `2` `3` `4` `5` `6` `7` `8` `9` `0` | `F1` … `F10` |
+| `-` `=` | `F11` `F12` |
+| `,` `.` `/` | `F13` `F14` `F15` |
+
+Nothing is given up to get these: every one of those keys keeps its ordinary
+meaning whenever the chord is not held. `Ctrl` alone is still `Ctrl` and `Menu`
+alone is still `Alt`, so the chord cannot collide with a guest shortcut.
+
+A solid white square appears in the top-left corner while the chord is held, so
+you can tell `F1` from `1` at a glance — without it there is no way to know the
+layer is engaged.
+
+A key pressed while the chord is held is **claimed** by the Fn layer: letting go
+of the chord first will not make it also type the underlying character.
+
+F13–F15 are `E0`-prefixed scancodes, exactly as on a PC.
+
+### Debug-only orientation controls
+
+`nspire95-cx-debug.tns` additionally:
+
+- cycles the panel orientation each time you press the **D-pad centre button**,
+  and draws the active setting as bars in the top-left corner (bar 1 = flip
+  top-bottom, bar 2 = flip left-right);
+- records `lcd_type()` and the resolved orientation in `winspire.log.tns`.
+
+Use the debug build to settle the panel orientation in one boot — see
+[Troubleshooting](#7-troubleshooting) — and the release build afterwards.
 
 ### Touchpad and mouse
 
