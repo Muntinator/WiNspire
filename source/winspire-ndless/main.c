@@ -702,36 +702,39 @@ static void draw_region(Display *display,
 		return;
 	}
 	/*
-	 * The panel scans bottom-up, so screen row top maps to panel row
-	 * SCREEN_HEIGHT - 1 - top. A partial update has to be written back
-	 * upside down to land on the same physical scanlines; mirroring it
-	 * row-wise here is cheaper than falling back to a whole-frame flip.
+	 * The panel scans bottom-up, so guest row r is presented on panel
+	 * row SCREEN_HEIGHT - 1 - r. A partial update therefore has to be
+	 * written to the panel upside down to land on the same physical
+	 * scanlines.
+	 *
+	 * The band is staged in flip_buffer and then copied out. Both sides
+	 * of that copy have to run in the SAME direction: the staging loop
+	 * writes flip rows mirror, mirror-1, ... (going *up* the panel as
+	 * the guest row increases), so the copy has to start at the lowest
+	 * row that was written - mirror - height + 1 - and walk upward.
+	 * Starting it at mirror instead, as an earlier version did, read
+	 * height-1 rows that had never been written and presented stale
+	 * pixels, which made the screen unreadable.
 	 */
 	if (!claim_lcd(display, false, now, NULL))
 		return;
 	if (display->flip_buffer) {
 		int mirror = SCREEN_HEIGHT - 1 - top;
+		int first = mirror - height + 1;
 
-		if (height == SCREEN_HEIGHT) {
-			flip_surface_vertical(
-				(const uint16_t *)display->framebuffer,
-				display->flip_buffer);
-		} else {
-			for (row = 0; row < height; row++) {
-				memcpy((uint16_t *)
-				       display->flip_buffer +
-				       (size_t)(mirror - row) * SCREEN_WIDTH +
-				       left,
-				       (const uint16_t *)
-				       display->framebuffer +
-				       (size_t)(top + row) * SCREEN_WIDTH +
-				       left,
-				       (size_t)width * sizeof(uint16_t));
-			}
+		for (row = 0; row < height; row++) {
+			memcpy((uint16_t *)
+			       display->flip_buffer +
+			       (size_t)(mirror - row) * SCREEN_WIDTH + left,
+			       (const uint16_t *)
+			       display->framebuffer +
+			       (size_t)(top + row) * SCREEN_WIDTH + left,
+			       (size_t)width * sizeof(uint16_t));
 		}
-		source = display->flip_buffer + (size_t)mirror * SCREEN_WIDTH + left;
+		source = display->flip_buffer +
+			(size_t)first * SCREEN_WIDTH + left;
 		screen = (uint16_t *)REAL_SCREEN_BASE_ADDRESS +
-			(size_t)mirror * SCREEN_WIDTH + left;
+			(size_t)first * SCREEN_WIDTH + left;
 	} else {
 		source = (uint16_t *)display->framebuffer +
 			top * SCREEN_WIDTH + left;

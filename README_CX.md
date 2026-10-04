@@ -325,7 +325,7 @@ rather than waiting forever for a block interrupt that would never arrive.
 | "Invalid INI entry at line N" | Syntax error in the INI. Section and key names are case-sensitive. |
 | "Not enough free RAM ..." | Lower `mem_size` in the INI. |
 | Display is rotated sideways on a CX II / rev W+ panel | Rebuild with `-DWINSPIRE_PANEL_ROTATE_CCW` (or without it, to flip back). The panel mount direction varies by hardware revision and cannot be detected at runtime. This only chooses a rotation direction; it cannot correct a mirror. |
-| Display is mirrored top-to-bottom | Fixed as of v1.0.2 — TI-Nspire OS draws from the bottom-left origin, so its framebuffer is stored bottom-up, and the frontend now flips the guest surface before presenting it. If you are on an older build, update. |
+| Display is mirrored top-to-bottom, or unreadable | Fixed as of v1.0.3 — TI-Nspire OS draws from the bottom-left origin, so its framebuffer is stored bottom-up, and the frontend now flips the guest surface before presenting it. v1.0.2 had a bug in the partial-update path that made the screen unreadable; update if you are on v1.0.2 or older. |
 | Screen goes black after launching | Press a key to exit, then run the `DEBUG` profile and check the message box; DEBUG traces far more. |
 | Guest never reaches the desktop | Check the image boots on a desktop emulator first. Windows 95 needs a matching IDE controller and `fill_cmos = 1`. |
 | Very slow | Expected on the original CX. Try TURBO, raise `clock_hz` only if the guest complains about timers, and see PERFORMANCE.md for where the time actually goes. |

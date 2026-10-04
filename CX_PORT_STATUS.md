@@ -116,6 +116,16 @@ warning-free and `check_cx_frontend.sh` is clean.
 
 ### 4b. Original-CX display orientation — **fixed**, output **unverified on hardware**
 
+> **Corrected in v1.0.3.** v1.0.2 shipped a bug in the *partial-update* path of
+> this same feature: it staged the flipped band into `flip_buffer` walking rows
+> upward from `mirror`, but then copied out starting at `mirror` and walking
+> upward too, so it read `height - 1` rows that had never been written and
+> presented stale pixels. On a full-screen update it read 240 rows past the end
+> of both buffers. The reported symptom was a screen mirrored on the Y axis and
+> unreadable. `draw_region()` now starts the copy at `mirror - height + 1`, the
+> lowest row the staging loop wrote, so both sides run in the same direction.
+> See the section below for the orientation fix itself.
+
 The original CX drew the whole screen **vertically mirrored**. Root cause:
 TI-Nspire OS draws from a bottom-left origin (y increasing upward), so the
 framebuffer behind `REAL_SCREEN_BASE_ADDRESS` stores scanline 0 at the **bottom**
@@ -322,9 +332,9 @@ All three profiles build here with zero warnings (`make cx`, `make cx-release`,
 `make cx-debug`):
 
 ```
-nspire95-cx.tns          382240 bytes   TURBO
-nspire95-cx-release.tns  362944 bytes   RELEASE
-nspire95-cx-debug.tns    335984 bytes   DEBUG
+nspire95-cx.tns          382168 bytes   TURBO
+nspire95-cx-release.tns  362872 bytes   RELEASE
+nspire95-cx-debug.tns    335960 bytes   DEBUG
 ```
 
 (Sizes as of the v1.0.1 release. The text-refresh optimisation in §4a adds
