@@ -36,3 +36,24 @@ clock_hz = 4770000
 ;[network]
 ;ssid = MyHomeNetwork
 ;password = correcthorsebatterystaple
+
+; Panel orientation, for the calculator target only (ignored elsewhere).
+;
+; Which correction a unit needs depends on how its LCD is mounted, and that is
+; not readable through the Ndless API. It is a setting here rather than a
+; constant compiled into the binary because getting it wrong by reasoning has
+; cost several releases; it should be read off a photograph instead.
+;
+;   0  leave the guest surface alone
+;   1  flip top-to-bottom
+;   2  flip left-to-right
+;   3  rotate 180 degrees   (the default)
+;
+; To find the right value on hardware, set orientation_marker = 1: white
+; brackets are drawn in the four corners with four different pairs of leg
+; lengths. One photograph then says which corner is which. Turn it back off
+; afterwards - it is an overlay, not part of the guest screen.
+;
+[nspire]
+orientation = 3
+;orientation_marker = 0

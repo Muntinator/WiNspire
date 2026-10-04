@@ -325,7 +325,7 @@ rather than waiting forever for a block interrupt that would never arrive.
 | "Invalid INI entry at line N" | Syntax error in the INI. Section and key names are case-sensitive. |
 | "Not enough free RAM ..." | Lower `mem_size` in the INI. |
 | Display is rotated sideways on a CX II / rev W+ panel | Rebuild with `-DWINSPIRE_PANEL_ROTATE_CCW` (or without it, to flip back). The panel mount direction varies by hardware revision and cannot be detected at runtime. This only chooses a rotation direction; it cannot correct a mirror. |
-| Display is mirrored, or unreadable | Fixed as of **v1.0.4** — the original CX presents the surface rotated 180°, so the frontend now rotates the guest surface by 180° before presenting it. Update if you are on v1.0.3 or older; v1.0.2/v1.0.3 corrected only the vertical axis, which on this panel leaves a left-right mirror. |
+| Display is mirrored, rotated or upside down | Set `orientation` under `[nspire]` in `winspire.ini` to `0` (none), `1` (flip top-bottom), `2` (flip left-right) or `3` (rotate 180, the default). To find the right value, set `orientation_marker = 1`: white brackets appear in the four corners with four different pairs of leg lengths, so one photo says which corner is which. Then set it back to 0. No rebuild needed. |
 | Screen goes black after launching | Press a key to exit, then run the `DEBUG` profile and check the message box; DEBUG traces far more. |
 | Guest never reaches the desktop | Check the image boots on a desktop emulator first. Windows 95 needs a matching IDE controller and `fill_cmos = 1`. |
 | Very slow | Expected on the original CX. Try TURBO, raise `clock_hz` only if the guest complains about timers, and see PERFORMANCE.md for where the time actually goes. |

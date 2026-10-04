@@ -90,4 +90,9 @@ static const t_key KEY_NSPIRE_R = KEYTPAD_(0x14, 0x001, 0x14, 0x040);
 static const t_key KEY_NSPIRE_P = KEY_(0x14, 0x002);
 static const t_key KEY_NSPIRE_DEL = KEY_(0x14, 0x004);
 
+/* Values copied verbatim from the Ndless SDK's keys.h (ndless-sdk/include). */
+static const t_key KEY_NSPIRE_MULTIPLY = KEYTPAD_(0x16, 0x002, 0x18, 0x100);
+static const t_key KEY_NSPIRE_APOSTROPHE = KEY_(0x1A, 0x001);
+static const t_key KEY_NSPIRE_MENU = KEY_(0x1C, 0x020);
+
 #endif /* WINSPIRE_NDLESS_STUB_KEYS_H */

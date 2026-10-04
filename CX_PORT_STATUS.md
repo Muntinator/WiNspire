@@ -114,85 +114,69 @@ fixed 2.6 s timer wait. The rendered SeaBIOS POST screen and its snapshot
 signature are byte-identical before and after; all three profiles build
 warning-free and `check_cx_frontend.sh` is clean.
 
-### 4b. Original-CX display orientation — **fixed in v1.0.4**, still **unverified on hardware**
+### 4b. Display orientation — **now a setting**, correctness **verified**, value **still unread on hardware**
 
-The original CX presents a linear surface rotated by **180 degrees**, so the
-frontend now rotates the guest surface by 180 degrees before presenting it.
+The panel correction is no longer compiled in. It is read from `winspire.ini`:
 
-This is not read off a documentation convention. It is pinned by two
-independent observations on real hardware, which between them admit exactly one
-panel transform. Let `P` be the panel's inherent mapping, `Fv` a vertical flip
-and `Fh` a horizontal mirror:
+    [nspire]
+    orientation = 3      ; 0 none, 1 flip top-bottom, 2 flip left-right, 3 rotate 180
+    orientation_marker = 1
 
-| Release | Correction applied | Reported / observed result |
-|---|---|---|
-| v1.0.0, v1.0.1 | none | "upside down" |
-| v1.0.2, v1.0.3 | `Fv` | **horizontal mirror** (photo of the Windows 95 splash) |
+`orientation_marker = 1` draws white brackets in the four corners with four
+different pairs of leg lengths, so **one photograph identifies which corner is
+which** and therefore exactly which setting the unit needs. Turn it off
+afterwards; it is an overlay, not part of the guest screen.
 
-So `P = R180` (a 180-degree rotation, which is what "upside down" describes on
-a rectangular screen) and `Fv . P = Fh`. Since `Fv . R180 = Fv . Fv . Fh =
-Fh`, both observations are satisfied by `P = R180` and by no other transform.
-The correct correction is therefore `R180` itself - reverse the rows *and* the
-columns.
+#### Why this stopped being a constant
 
-**Why the earlier diagnosis was wrong.** v1.0.2 applied only `Fv`, on the
-reading that TI-Nspire OS draws from a bottom-left origin and therefore stores
-its framebuffer bottom-up. That origin describes how the OS *issues drawing
-commands* (`screen.drawString`, `gui_gc_fillRect`); it says nothing about the
-order in which `lcd_blit()` fills panel memory. Conflating the two produced a
-vertical-only correction, which composed with the panel's real 180-degree
-rotation into a left-right mirror. The v1.0.3 partial-update fix was a genuine
-bug fix - it corrected reading rows the staging loop had never written, and on
-a full-screen update it was reading 240 rows past the end of both buffers - but
-it fixed an indexing error, not the orientation.
+Four releases have now shipped a different orientation guess, and the fifth
+guess cannot be made from here either: no calculator is available, and the
+reports available in this workspace do not unambiguously separate the four
+possibilities. Guessing again would be the same mistake a fifth time. The
+property that determines the answer is cheap to measure on hardware and
+impossible to deduce from the Ndless API, so it is now measured.
 
-`source/winspire-ndless/main.c` now uses `rotate_surface_180()` on the
-**non-rotated** path, plus the matching row *and* column remap in the
-`draw_region()` partial-update path (which bypasses `panel_blit()`). Because
-the columns reverse, the partial-update staging copy is per-pixel rather than a
-`memcpy`; the full-width `memcpy` fast path still applies, since a full-width
-band starts at panel column 0. `WINSPIRE_PANEL_ROTATE_CCW` is unchanged: it
-selects a rotation *direction* and cannot correct a mirror.
+The evidence that did *not* survive scrutiny is worth recording. v1.0.2
+inferred a bottom-up scan order from the TI-Nspire OS's bottom-left drawing
+origin. That origin describes how the OS issues drawing commands
+(`screen.drawString`, `gui_gc_fillRect`); it says nothing about the order in
+which `lcd_blit()` fills panel memory. Conflating them is what produced a
+left-right mirror where a vertical flip had been intended. Two further claims
+recorded earlier also did not hold up and should not be repeated: that
+`lcd_init(SCR_320x240_565)` was wrong, and that a CX II/rev W+ panel needed
+different handling.
 
-The calculator's own chrome is unaffected because the OS draws it through its
-own path, not through `lcd_blit()` - visible in the same photograph, where the
-`School Property` banner and the `esc` / `tab` / `ctrl` key legends are upright
-while the guest splash is mirrored.
+One useful negative result: the transform is applied identically to the BIOS
+POST screen and to Windows 95, and both were wrong in the same way. That rules
+out the guest, the VGA BIOS and the resolution - the fault is in the blit,
+which is the one place this code can fix.
 
-**Verified here:** an index-level harness models the panel as a 180-degree
-rotation and asserts that every presented pixel equals the pixel the guest
-drew, for the full-frame path and for eight partial-update bands (full
-screen, full-width, top-left pixel, bottom-right pixel, bottom-right block,
-left-aligned band, unaligned 17x13 band, tall right half) - 0 wrong pixels in
-every case, with pixels outside each band asserted undisturbed. The same
-harness **reproduces both historical reports**: fed the old vertical-flip-only
-code it fails with pixel (0,0) showing 319 = guest(319,0), i.e. a left-right
-mirror, and fed the v1.0.0 identity code it fails with pixel (0,0) showing
-11263 = guest(319,239), i.e. a 180-degree rotation. Only `rotate_surface_180`
-passes, which is the evidence that this correction is the one that matches the
-hardware rather than merely a plausible fifth guess.
+#### Verified here
+
+`transform_surface()` and the `draw_region()` staging loop are the same code
+for all four settings, so the invariant that matters is that **the partial
+update path agrees with the full-frame blit** for every setting - if they
+disagree the screen tears into a mixture of orientations and freezes stale
+pixels, which is the v1.0.3 defect. An index-level harness establishes the
+full-frame result and then asserts, pixel by pixel, that nine partial-update
+bands leave exactly that result: **4 settings x 9 bands, 0 wrong pixels**.
+
+The harness has teeth: reintroducing the v1.0.3 copy-direction bug makes it
+**segfault**, the same out-of-bounds write that shipped as a real defect in
+v1.0.2. It also caught two out-of-range bands while being written, which is
+why `draw_region()` now clips its rectangle itself instead of trusting the
+caller - every branch below computes panel coordinates by reflecting the guest
+rectangle, so an unclipped one writes outside both the staging buffer and the
+panel.
 
 Also verified: type-check clean on all three profiles; all three `.tns` build
-warning-free (335968 / 362928 / 382224 bytes) and pass `genzehn`; the compiled
-ARM binary contains the expected reversal in both paths - `sub lr, lr, #640`
-with `ldrh r1, [r3, #-2]!` / `strh r1, [r2, #2]!` in `panel_blit`, and
-`rsb r1, r3, #239` / `add r3, r1, #1` / `ldrh r0, [r1, #-2]!` in the inlined
-`draw_region`; `make selftest` PASS; the benchmark still completes, exit 0,
-phases 0-7, 25 redraw regions, `vga step` 16.7% of wall.
+warning-free (337076 / 363964 / 383260 bytes) and pass `genzehn`; `make
+selftest` PASS; the benchmark still completes, exit 0, 26 redraw regions,
+`vga step` 16.6% of wall.
 
-**Still not verified:** no calculator was available in this environment, so
-the corrected orientation has not been observed. The reasoning is now derived
-from observation rather than convention, which is a materially stronger claim,
-but it is still not a panel. If a unit comes out correct but *unmirrored*,
-revert `rotate_surface_180()` - it is one self-contained block, and reverting
-it lands exactly on the v1.0.1 behaviour.
-
-Earlier claims recorded here so they are not repeated: `lcd_init(SCR_320x240_565)`
-is correct (the `return false` for `SCR_240x320_565` is a pre-r2004 branch this
-build never reaches, and `assert_ndless_rev(2004)` is enforced); both
-`rotate_surface()` branches are correct 90-degree rotations rather than
-reflections; and the OS's bottom-left drawing origin is not evidence about
-`lcd_blit()` fill order.
+**Still open, and only the owner of the hardware can close it:** which of the
+four values this particular CX needs. It is one edit to one line in
+`winspire.ini` and no rebuild - deliberately.
 
 ### 5. cxlink protocol, Nspire-side bridge, and the guest DHCP server —
 **typechecked**, with an **executable self test** for both

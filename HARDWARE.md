@@ -46,15 +46,16 @@ Consequences for this port, all implemented in `source/winspire-ndless/main.c`:
   mount and cannot be read from the Ndless API. `WINSPIRE_PANEL_ROTATE_CCW`
   selects it and must be set empirically on hardware. This is a rotation
   choice only.
-- The original CX (MADCTL `0x08`, no row/column exchange) presents a linear
-  surface **rotated 180 degrees**. This is measured, not assumed: v1.0.0/1
-  applied no correction and was reported "upside down", and v1.0.2/3 applied a
-  vertical flip and produced a left-right mirror. A vertical flip composed with
-  a 180-degree rotation is exactly a horizontal mirror, so both reports are
-  satisfied by one panel transform and the correction has to be a full 180
-  degrees - rows *and* columns (`rotate_surface_180()` in
-  `source/winspire-ndless/main.c`). A transposed panel does not need this,
-  which is why it is keyed on `!rotated_panel` and not applied to both.
+- **MEASURED PER UNIT, NOT ASSUMED:** the orientation correction applied on the
+  non-rotated path. It is read from `winspire.ini` under `[nspire]` as
+  `orientation` (0 none, 1 flip top-bottom, 2 flip left-to-right, 3 rotate
+  180) and defaults to 3. It cannot be derived from the Ndless API, and four
+  releases of guessing at it went wrong, so it is set per unit instead. Set
+  `orientation_marker = 1` and one photograph of the corner brackets
+  identifies the right value; see `CX_PORT_STATUS.md` §4b.
+  `transform_surface()` in `source/winspire-ndless/main.c` implements it. A
+  transposed panel does not use this, which is why it is keyed on
+  `!rotated_panel`.
 - Note that the TI-Nspire OS's bottom-left drawing origin is **not** evidence
   about fill order: it describes how the OS issues drawing commands, not the
   order in which `lcd_blit()` writes panel memory. An earlier version inferred

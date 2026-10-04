@@ -52,6 +52,24 @@
 #define BTN_LEFT 0x01
 #define BTN_RIGHT 0x02
 #define KEY_SEMICOLON 0x27
+#define KEY_APOSTROPHE 0x34
+#define KEY_ASTERISK 0x33
+#define KEY_ALT 58
+/*
+ * Panel orientation corrections. ORIENT_FLIP_V reverses the rows and
+ * ORIENT_FLIP_H the columns, so ORIENT_ROT_180 is both. See the comment on
+ * transform_surface() for why this is a setting rather than a constant.
+ */
+#define ORIENT_FLIP_V 0x01
+#define ORIENT_FLIP_H 0x02
+#define ORIENT_IDENTITY 0x00
+#define ORIENT_FLIP_TOP 0x01
+#define ORIENT_FLIP_LEFT 0x02
+#define ORIENT_ROT_180 (ORIENT_FLIP_V | ORIENT_FLIP_H)
+#define ORIENT_DEFAULT ORIENT_ROT_180
+#define KEY_APOSTROPHE 0x34
+#define KEY_ASTERISK 0x33
+#define KEY_ALT 58
 #define GUEST_RAM_MIN (4L * 1024 * 1024)
 #define GUEST_RAM_MAX (32L * 1024 * 1024)
 #define VGA_RAM_MIN (64L * 1024)
@@ -191,6 +209,8 @@ static uint64_t tick_remainder;
 static uint32_t guest_hz = CPU_HZ;
 static uint32_t input_poll_loops = INPUT_POLL_LOOPS;
 static uint32_t video_poll_loops = VIDEO_POLL_LOOPS;
+static int orientation = ORIENT_DEFAULT;
+static bool orientation_marker;
 static volatile bool mode_changed;
 static TouchState touchpad_state;
 
@@ -207,6 +227,10 @@ static int parse_native_config(void *user, const char *section,
 			input_poll_loops = (uint32_t)strtoul(value, NULL, 0);
 		else if (!strcmp(name, "video_poll_loops"))
 			video_poll_loops = (uint32_t)strtoul(value, NULL, 0);
+		else if (!strcmp(name, "orientation"))
+			orientation = (int)strtol(value, NULL, 0);
+		else if (!strcmp(name, "orientation_marker"))
+			orientation_marker = strtol(value, NULL, 0) != 0;
 		return 1;
 	}
 	return parse_conf_ini(user, section, name, value);
@@ -266,7 +290,15 @@ static KeyBinding keys[] = {
 	{ &KEY_NSPIRE_PERIOD, 52, false },
 	{ &KEY_NSPIRE_DIVIDE, 53, false },
 	{ &KEY_NSPIRE_VAR, KEY_SEMICOLON, false },
+	{ &KEY_NSPIRE_MULTIPLY, KEY_ASTERISK, false },
+	{ &KEY_NSPIRE_APOSTROPHE, KEY_APOSTROPHE, false },
 	{ &KEY_NSPIRE_SPACE, 57, false },
+	/*
+	 * The CX has no Alt key at all, and Windows 95 needs one for every
+	 * menu mnemonic and for Alt+Tab, so the hardware "menu" key - which
+	 * has no other use in a PC guest - stands in for it.
+	 */
+	{ &KEY_NSPIRE_MENU, KEY_ALT, false },
 	{ &KEY_NSPIRE_HOME, 102, false },
 	{ &KEY_NSPIRE_UP, 103, false },
 	{ &KEY_NSPIRE_LEFT, 105, false },
@@ -677,13 +709,13 @@ static void draw_frame(Display *display, bool force)
 	display->last_draw_ms = now;
 }
 
-static void rotate_surface_180(const uint16_t *src, uint16_t *dst);
+static void transform_surface(const uint16_t *src, uint16_t *dst, int op);
 
 static void draw_region(Display *display,
 		int left, int top, int width, int height)
 {
 	uint64_t now = host_millis();
-	uint16_t *source;
+	const uint16_t *source;
 	uint16_t *screen;
 	int row;
 
@@ -692,6 +724,26 @@ static void draw_region(Display *display,
 		draw_frame(display, false);
 		return;
 	}
+	/*
+	 * Clip again rather than trusting the caller. Every branch below
+	 * computes panel coordinates by reflecting the guest rectangle, and an
+	 * unclipped one writes outside both the staging buffer and the panel -
+	 * which is how v1.0.2 ended up reading 240 rows past the end of both.
+	 */
+	if (left < 0) {
+		width += left;
+		left = 0;
+	}
+	if (top < 0) {
+		height += top;
+		top = 0;
+	}
+	if (left + width > SCREEN_WIDTH)
+		width = SCREEN_WIDTH - left;
+	if (top + height > SCREEN_HEIGHT)
+		height = SCREEN_HEIGHT - top;
+	if (width <= 0 || height <= 0)
+		return;
 	/*
 	 * A rotated panel has no linear 320-wide surface to patch in place, and
 	 * REAL_SCREEN_BASE_ADDRESS strides by the panel width. Present the whole
@@ -702,48 +754,73 @@ static void draw_region(Display *display,
 		return;
 	}
 	/*
-	 * The panel presents a 180-degree rotated surface, so guest pixel
-	 * (x, y) lands on panel pixel (SCREEN_WIDTH - 1 - x,
-	 * SCREEN_HEIGHT - 1 - y). A partial update has to be written to the
-	 * panel through that same mapping to land on the right pixels.
+	 * The partial update has to be written to the panel through the same
+	 * mapping the full-frame blit uses, or the two paths disagree and the
+	 * screen tears into a mixture of orientations.
 	 *
-	 * The band is staged in flip_buffer and then copied out. Both sides
-	 * of that copy have to run in the SAME direction: the staging loop
-	 * writes flip rows mirror, mirror-1, ... (going *up* the panel as
-	 * the guest row increases), so the copy has to start at the lowest
-	 * row that was written - mirror - height + 1 - and walk upward.
-	 * Starting it at mirror instead, as an earlier version did, read
-	 * height-1 rows that had never been written and presented stale
+	 * The band is staged in flip_buffer and then copied out. Both sides of
+	 * that copy have to run in the SAME direction: the staging loop writes
+	 * flip rows mirror, mirror-1, ... (going *up* the panel as the guest
+	 * row increases when ORIENT_FLIP_V is set), so the copy has to start
+	 * at the lowest row that was written - mirror - height + 1 - and walk
+	 * upward. Starting it at mirror instead, as an earlier version did,
+	 * read height-1 rows that had never been written and presented stale
 	 * pixels, which made the screen unreadable.
 	 *
-	 * The columns reverse too, so the staging copy is per-pixel rather
-	 * than a memcpy: guest column left lands at panel column
-	 * SCREEN_WIDTH - 1 - left, and the band runs backwards from there.
+	 * With ORIENT_FLIP_H the columns reverse too, so the staging copy is
+	 * per-pixel rather than a memcpy: guest column left lands at panel
+	 * column SCREEN_WIDTH - 1 - left, and the band runs backwards from
+	 * there.
+	 *
+	 * The orientation marker is a full-frame overlay, so a partial update
+	 * would erase it. Draw the frame instead whenever it is enabled.
 	 */
+	if (orientation_marker) {
+		draw_frame(display, false);
+		return;
+	}
 	if (!claim_lcd(display, false, now, NULL))
 		return;
-	if (display->flip_buffer) {
+	if (display->flip_buffer && orientation != ORIENT_IDENTITY) {
+		int flip_rows = (orientation & ORIENT_FLIP_V) != 0;
+		int flip_cols = (orientation & ORIENT_FLIP_H) != 0;
 		int mirror = SCREEN_HEIGHT - 1 - top;
-		int first = mirror - height + 1;
-		int col = SCREEN_WIDTH - left - width;
+		int first = flip_rows ? mirror - height + 1 : top;
+		int col = flip_cols ? SCREEN_WIDTH - left - width : left;
 
 		for (row = 0; row < height; row++) {
 			const uint16_t *in =
 				(const uint16_t *)display->framebuffer +
 				(size_t)(top + row) * SCREEN_WIDTH + left;
 			uint16_t *out = (uint16_t *)display->flip_buffer +
-				(size_t)(mirror - row) * SCREEN_WIDTH + col;
+				(size_t)(flip_rows ? mirror - row : top + row) *
+				SCREEN_WIDTH + col;
 			int i;
 
-			for (i = 0; i < width; i++)
-				out[i] = in[width - 1 - i];
+			if (flip_cols) {
+				for (i = 0; i < width; i++)
+					out[i] = in[width - 1 - i];
+			} else {
+				memcpy(out, in,
+				       (size_t)width * sizeof(uint16_t));
+			}
 		}
 		source = display->flip_buffer +
 			(size_t)first * SCREEN_WIDTH + col;
 		screen = (uint16_t *)REAL_SCREEN_BASE_ADDRESS +
 			(size_t)first * SCREEN_WIDTH + col;
+		if (!flip_rows) {
+			/* Rows stay in place, so copy them one at a time. */
+			for (row = 0; row < height; row++) {
+				memcpy(screen + (size_t)row * SCREEN_WIDTH,
+				       source + (size_t)row * SCREEN_WIDTH,
+				       (size_t)width * sizeof(uint16_t));
+			}
+			display->last_draw_ms = now;
+			return;
+		}
 	} else {
-		source = (uint16_t *)display->framebuffer +
+		source = (const uint16_t *)display->framebuffer +
 			top * SCREEN_WIDTH + left;
 		screen = (uint16_t *)REAL_SCREEN_BASE_ADDRESS +
 			top * SCREEN_WIDTH + left;
@@ -932,48 +1009,87 @@ static void rotate_surface(const uint16_t *src, uint16_t *dst)
 }
 
 /*
- * The original CX presents a linear surface rotated by 180 degrees.
+ * Panel orientation.
  *
- * This is not an inference from a documentation convention; it is pinned by
- * two observations on real hardware, which together admit exactly one
- * transform. Let P be the panel's inherent mapping and Fv a vertical flip:
+ * Four corrections are possible, and which one a unit needs is a property of
+ * how that unit's LCD is mounted - it cannot be read from the Ndless API. It
+ * has also proven impossible to derive reliably from documentation: the
+ * TI-Nspire OS's bottom-left drawing origin describes how the OS issues
+ * drawing commands, not the order in which lcd_blit() fills panel memory, and
+ * reading it as a scan order is what produced two wrong releases in a row.
  *
- *   v1.0.0/1 shipped no correction and was reported "upside down", i.e.
- *       P = R180 (a 180-degree rotation).
- *   v1.0.2/3 shipped Fv and the screen is horizontally mirrored, i.e.
- *       Fv . P = Fh.
+ * So the correction is a runtime setting (`orientation` under `[nspire]` in
+ * winspire.ini) rather than something compiled in, and `orientation_marker`
+ * draws corner brackets whose leg lengths identify which way is up. Both
+ * together settle it from a single photograph instead of from an argument.
  *
- * Fv . R180 = Fv . Fv . Fh = Fh, so both observations are satisfied by the
- * single panel transform R180 and by nothing else. The correct correction is
- * therefore R180 itself: reverse the rows AND the columns.
- *
- * An earlier version applied only Fv on the strength of the TI-Nspire OS's
- * bottom-left drawing origin. That origin describes how the OS issues
- * drawing commands; it does not describe the order in which lcd_blit() fills
- * panel memory. Reading it as a scan order was the mistake, and Fv composed
- * with the panel's real 180-degree rotation left a horizontal mirror - which
- * is why the earlier "vertical flip" diagnosis produced a left-right mirror
- * rather than an upright image.
- *
- * The calculator's own chrome is unaffected because the OS draws it through
- * its own path, not through lcd_blit().
- *
- * A rotated panel (CX revision W and later, CX II) is transposed by
- * rotate_surface() above and needs no correction here, which is why this is
- * keyed on !rotated_panel.
+ * The flag bits compose: ORIENT_FLIP_V reverses the rows, ORIENT_FLIP_H
+ * reverses the columns.
  */
-static void rotate_surface_180(const uint16_t *src, uint16_t *dst)
+static void transform_surface(const uint16_t *src, uint16_t *dst, int op)
 {
 	int row;
-	int col;
 
 	for (row = 0; row < SCREEN_HEIGHT; row++) {
-		const uint16_t *in =
-			src + (size_t)(SCREEN_HEIGHT - 1 - row) * SCREEN_WIDTH;
+		int sy = (op & ORIENT_FLIP_V) ?
+			SCREEN_HEIGHT - 1 - row : row;
+		const uint16_t *in = src + (size_t)sy * SCREEN_WIDTH;
 		uint16_t *out = dst + (size_t)row * SCREEN_WIDTH;
 
-		for (col = 0; col < SCREEN_WIDTH; col++)
-			out[col] = in[SCREEN_WIDTH - 1 - col];
+		if (op & ORIENT_FLIP_H) {
+			int col;
+
+			for (col = 0; col < SCREEN_WIDTH; col++)
+				out[col] = in[SCREEN_WIDTH - 1 - col];
+		} else {
+			memcpy(out, in, (size_t)SCREEN_WIDTH * sizeof(uint16_t));
+		}
+	}
+}
+
+/*
+ * Corner brackets drawn on top of the presented surface. Each corner gets a
+ * different pair of leg lengths, so one photograph identifies which corner is
+ * which and therefore exactly which correction the unit needs.
+ */
+static void draw_orientation_marker(uint16_t *surface, int op)
+{
+	static const struct {
+		int x;
+		int y;
+		int dx;
+		int dy;
+		int h;
+		int v;
+	} corners[4] = {
+		{ 0,                   0,                   1, 1, 28, 20 },
+		{ SCREEN_WIDTH - 1,    0,                  -1, 1, 12, 20 },
+		{ 0,                   SCREEN_HEIGHT - 1,   1, -1, 28, 10 },
+		{ SCREEN_WIDTH - 1,    SCREEN_HEIGHT - 1,  -1, -1, 12, 10 },
+	};
+	unsigned int index;
+
+	for (index = 0; index < 4; index++) {
+		int px = (op & ORIENT_FLIP_H) ?
+			SCREEN_WIDTH - 1 - corners[index].x : corners[index].x;
+		int py = (op & ORIENT_FLIP_V) ?
+			SCREEN_HEIGHT - 1 - corners[index].y : corners[index].y;
+		int step;
+		int dx = (op & ORIENT_FLIP_H) ? -corners[index].dx : corners[index].dx;
+		int dy = (op & ORIENT_FLIP_V) ? -corners[index].dy : corners[index].dy;
+
+		for (step = 0; step < corners[index].h; step++) {
+			int x = px + dx * step;
+
+			surface[(size_t)py * SCREEN_WIDTH + x] = 0xFFFF;
+			surface[(size_t)(py + dy) * SCREEN_WIDTH + x] = 0xFFFF;
+		}
+		for (step = 0; step < corners[index].v; step++) {
+			int y = py + dy * step;
+
+			surface[(size_t)y * SCREEN_WIDTH + px] = 0xFFFF;
+			surface[(size_t)y * SCREEN_WIDTH + px + dx] = 0xFFFF;
+		}
 	}
 }
 
@@ -990,9 +1106,11 @@ static void panel_blit(Display *display)
 		return;
 	}
 	if (display->flip_buffer) {
-		rotate_surface_180(
-			(const uint16_t *)display->framebuffer,
-			display->flip_buffer);
+		transform_surface((const uint16_t *)display->framebuffer,
+				  display->flip_buffer, orientation);
+		if (orientation_marker)
+			draw_orientation_marker(display->flip_buffer,
+						orientation);
 		lcd_blit(display->flip_buffer, hw.panel_format);
 		return;
 	}
