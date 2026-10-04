@@ -42,18 +42,24 @@ clock_hz = 4770000
 ; Which correction a unit needs depends on how its LCD is mounted, and that is
 ; not readable through the Ndless API. It is a setting here rather than a
 ; constant compiled into the binary because getting it wrong by reasoning has
-; cost several releases; it should be read off a photograph instead.
+; cost several releases; it should be read off the screen instead.
 ;
-;   0  leave the guest surface alone
+;   0  leave the guest surface alone   (the default)
 ;   1  flip top-to-bottom
 ;   2  flip left-to-right
-;   3  rotate 180 degrees   (the default)
+;   3  rotate 180 degrees
 ;
-; To find the right value on hardware, set orientation_marker = 1: white
-; brackets are drawn in the four corners with four different pairs of leg
-; lengths. One photograph then says which corner is which. Turn it back off
-; afterwards - it is an overlay, not part of the guest screen.
+; You do not have to edit this file. Press the D-pad centre button while
+; WiNspire is running and the setting cycles 0 -> 1 -> 2 -> 3 -> 0. A digit
+; in the top-left corner shows which value is live and white brackets mark
+; the four corners, so you can see the screen become upright and photograph
+; the moment it is right. Five seconds later the overlays go away by
+; themselves. The value you settle on is written to winspire.orient.tns and
+; takes precedence over the line below; delete that file to go back to using
+; this one.
+;
+; Set orientation_marker = 1 to keep the corner brackets on permanently.
 ;
 [nspire]
-orientation = 3
+orientation = 0
 ;orientation_marker = 0

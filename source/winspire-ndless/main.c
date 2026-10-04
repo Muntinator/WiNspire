@@ -76,17 +76,23 @@
 #define SCAN_F14 0xe069
 #define SCAN_F15 0xe06a
 /*
- * Panel orientation corrections. ORIENT_FLIP_V reverses the rows and
- * ORIENT_FLIP_H the columns, so ORIENT_ROT_180 is both. See the comment on
- * transform_surface() for why this is a setting rather than a constant.
+ * Panel orientation corrections. The transform, the corner marker and the
+ * value digit all live in orientation.h, which the host self test compiles
+ * too - a transcribed copy would keep passing while the shipping code changed
+ * underneath it, which is the mistake this setting has already made four
+ * times. See that header for why the value is measured rather than assumed.
  */
-#define ORIENT_FLIP_V 0x01
-#define ORIENT_FLIP_H 0x02
-#define ORIENT_IDENTITY 0x00
-#define ORIENT_FLIP_TOP 0x01
-#define ORIENT_FLIP_LEFT 0x02
-#define ORIENT_ROT_180 (ORIENT_FLIP_V | ORIENT_FLIP_H)
-#define ORIENT_DEFAULT ORIENT_ROT_180
+#include "orientation.h"
+
+/*
+ * Identity is the default, and it is the physically correct value for a stock
+ * CX: lcd_blit() presents the 320x240 surface in panel scan order, so the
+ * guest framebuffer has to be handed over unchanged. Every non-zero default
+ * this port has shipped was a guess about how the panel is mounted, and those
+ * guesses were wrong on real hardware. The correction is now chosen on the
+ * calculator with the D-pad and written to disk.
+ */
+#define ORIENT_DEFAULT ORIENT_IDENTITY
 #define KEY_APOSTROPHE 0x34
 #define KEY_ASTERISK 0x33
 #define KEY_ALT 58
@@ -223,9 +229,22 @@ static uint64_t tick_remainder;
 static uint32_t guest_hz = CPU_HZ;
 static uint32_t input_poll_loops = INPUT_POLL_LOOPS;
 static uint32_t video_poll_loops = VIDEO_POLL_LOOPS;
+/* File the D-pad choice is remembered in, next to the .tns. */
+#define ORIENT_OVERRIDE_FILE "winspire.orient.tns"
+#define ORIENT_NOTICE_MS 5000ULL
+
 static int orientation = ORIENT_DEFAULT;
 static bool orientation_marker;
 static bool fn_mode;
+/*
+ * How long the corner marker and the orientation digit stay on screen after
+ * the D-pad changes the setting, in host_millis() terms. Zero means "no notice
+ * window open".
+ */
+static uint64_t orientation_notice_until;
+/* Path of the small override file that makes the D-pad choice survive a
+ * restart. Empty when the frontend was given an explicit config path. */
+static char orientation_override_path[512];
 
 /*
  * The Fn chord: Ctrl and Alt held together.
@@ -259,8 +278,18 @@ static int parse_native_config(void *user, const char *section,
 			input_poll_loops = (uint32_t)strtoul(value, NULL, 0);
 		else if (!strcmp(name, "video_poll_loops"))
 			video_poll_loops = (uint32_t)strtoul(value, NULL, 0);
-		else if (!strcmp(name, "orientation"))
-			orientation = (int)strtol(value, NULL, 0);
+		else if (!strcmp(name, "orientation")) {
+			int requested = (int)strtol(value, NULL, 0);
+
+			/* Masked, so a typo cannot select a fifth transform. */
+			orientation = requested & ORIENT_ROT_180;
+#if defined(WINSPIRE_PROFILE_DEBUG)
+			if (orientation != requested)
+				nspire_log("orientation %d out of range, "
+					   "using %d\n", requested,
+					   orientation);
+#endif
+		}
 		else if (!strcmp(name, "orientation_marker"))
 			orientation_marker = strtol(value, NULL, 0) != 0;
 		return 1;
@@ -672,6 +701,8 @@ static void draw_frame(Display *display, bool force)
 }
 
 static void transform_surface(const uint16_t *src, uint16_t *dst, int op);
+static bool orientation_notice_open(void);
+static bool orientation_notice_expired(void);
 
 static void draw_region(Display *display,
 		int left, int top, int width, int height)
@@ -734,10 +765,11 @@ static void draw_region(Display *display,
 	 * column SCREEN_WIDTH - 1 - left, and the band runs backwards from
 	 * there.
 	 *
-	 * The orientation marker is a full-frame overlay, so a partial update
-	 * would erase it. Draw the frame instead whenever it is enabled.
+	 * The orientation marker and the value digit are full-frame overlays,
+	 * so a partial update would erase them. Draw the frame instead
+	 * whenever either is showing.
 	 */
-	if (orientation_marker) {
+	if (orientation_marker || orientation_notice_open()) {
 		draw_frame(display, false);
 		return;
 	}
@@ -973,86 +1005,23 @@ static void rotate_surface(const uint16_t *src, uint16_t *dst)
 /*
  * Panel orientation.
  *
- * Four corrections are possible, and which one a unit needs is a property of
- * how that unit's LCD is mounted - it cannot be read from the Ndless API. It
- * has also proven impossible to derive reliably from documentation: the
- * TI-Nspire OS's bottom-left drawing origin describes how the OS issues
- * drawing commands, not the order in which lcd_blit() fills panel memory, and
- * reading it as a scan order is what produced two wrong releases in a row.
- *
- * So the correction is a runtime setting (`orientation` under `[nspire]` in
- * winspire.ini) rather than something compiled in, and `orientation_marker`
- * draws corner brackets whose leg lengths identify which way is up. Both
- * together settle it from a single photograph instead of from an argument.
- *
- * The flag bits compose: ORIENT_FLIP_V reverses the rows, ORIENT_FLIP_H
- * reverses the columns.
+ * The transform, the corner brackets and the value digit are in
+ * orientation.h, shared with the host self test. These wrappers only bind
+ * them to the calculator's screen size.
  */
 static void transform_surface(const uint16_t *src, uint16_t *dst, int op)
 {
-	int row;
-
-	for (row = 0; row < SCREEN_HEIGHT; row++) {
-		int sy = (op & ORIENT_FLIP_V) ?
-			SCREEN_HEIGHT - 1 - row : row;
-		const uint16_t *in = src + (size_t)sy * SCREEN_WIDTH;
-		uint16_t *out = dst + (size_t)row * SCREEN_WIDTH;
-
-		if (op & ORIENT_FLIP_H) {
-			int col;
-
-			for (col = 0; col < SCREEN_WIDTH; col++)
-				out[col] = in[SCREEN_WIDTH - 1 - col];
-		} else {
-			memcpy(out, in, (size_t)SCREEN_WIDTH * sizeof(uint16_t));
-		}
-	}
+	orient_transform(src, dst, SCREEN_WIDTH, SCREEN_HEIGHT, op);
 }
 
-/*
- * Corner brackets drawn on top of the presented surface. Each corner gets a
- * different pair of leg lengths, so one photograph identifies which corner is
- * which and therefore exactly which correction the unit needs.
- */
 static void draw_orientation_marker(uint16_t *surface, int op)
 {
-	static const struct {
-		int x;
-		int y;
-		int dx;
-		int dy;
-		int h;
-		int v;
-	} corners[4] = {
-		{ 0,                   0,                   1, 1, 28, 20 },
-		{ SCREEN_WIDTH - 1,    0,                  -1, 1, 12, 20 },
-		{ 0,                   SCREEN_HEIGHT - 1,   1, -1, 28, 10 },
-		{ SCREEN_WIDTH - 1,    SCREEN_HEIGHT - 1,  -1, -1, 12, 10 },
-	};
-	unsigned int index;
+	orient_draw_marker(surface, SCREEN_WIDTH, SCREEN_HEIGHT, op);
+}
 
-	for (index = 0; index < 4; index++) {
-		int px = (op & ORIENT_FLIP_H) ?
-			SCREEN_WIDTH - 1 - corners[index].x : corners[index].x;
-		int py = (op & ORIENT_FLIP_V) ?
-			SCREEN_HEIGHT - 1 - corners[index].y : corners[index].y;
-		int step;
-		int dx = (op & ORIENT_FLIP_H) ? -corners[index].dx : corners[index].dx;
-		int dy = (op & ORIENT_FLIP_V) ? -corners[index].dy : corners[index].dy;
-
-		for (step = 0; step < corners[index].h; step++) {
-			int x = px + dx * step;
-
-			surface[(size_t)py * SCREEN_WIDTH + x] = 0xFFFF;
-			surface[(size_t)(py + dy) * SCREEN_WIDTH + x] = 0xFFFF;
-		}
-		for (step = 0; step < corners[index].v; step++) {
-			int y = py + dy * step;
-
-			surface[(size_t)y * SCREEN_WIDTH + px] = 0xFFFF;
-			surface[(size_t)y * SCREEN_WIDTH + px + dx] = 0xFFFF;
-		}
-	}
+static void draw_orientation_digit(uint16_t *surface)
+{
+	orient_draw_digit(surface, SCREEN_WIDTH, orientation);
 }
 
 /*
@@ -1114,6 +1083,110 @@ static void draw_status_overlay(uint16_t *surface)
 #endif
 }
 
+/*
+ * A 3x5 digit, drawn at 3x scale in the top-left corner, naming the live
+ * setting as 0-3.
+ *
+ * Two bars only encoded two bits ambiguously: "no bars drawn" cannot be told
+ * apart from "the overlay is not running", which is exactly the distinction
+ * needed when working out whether a setting is being honoured on the unit.
+ * The glyph is orient_draw_digit() from orientation.h.
+ */
+static bool orientation_notice_open(void)
+{
+	return orientation_notice_until != 0 &&
+	       host_millis() < orientation_notice_until;
+}
+
+/*
+ * Close the notice window if it has run out, and report whether it did.
+ *
+ * The caller uses that to force one full redraw: the overlays are stale the
+ * moment the window closes, and leaving them up would put a permanently wrong
+ * digit in the corner of the guest screen.
+ */
+static bool orientation_notice_expired(void)
+{
+	if (!orientation_notice_until ||
+	    host_millis() < orientation_notice_until)
+		return false;
+	orientation_notice_until = 0;
+	return true;
+}
+
+/*
+ * Remember the orientation the D-pad selected, so the next run starts with the
+ * value that was just confirmed by eye instead of the one in the INI.
+ *
+ * This is the whole point of making the setting runtime-adjustable: the only
+ * trustworthy source for it is the screen of the unit it runs on. Writing it
+ * out means that observation is captured once and reused, instead of being
+ * re-guessed from a development machine every time.
+ */
+static void orientation_save(void)
+{
+	FILE *file = fopen(ORIENT_OVERRIDE_FILE, "wb");
+
+	if (!file) {
+#if defined(WINSPIRE_PROFILE_DEBUG)
+		/* Only the DEBUG profile writes a trace file. */
+		nspire_log("could not write %s\n",
+			   ORIENT_OVERRIDE_FILE);
+#endif
+		return;
+	}
+	fprintf(file, "; written by WiNspire when the orientation was set\n"
+		     "; with the D-pad centre button. Delete this file to go\n"
+		     "; back to the orientation setting in winspire.ini.tns.\n"
+		     "orientation = %d\n",
+		orientation);
+	fclose(file);
+#if defined(WINSPIRE_PROFILE_DEBUG)
+	nspire_log("orientation %d saved to %s\n", orientation,
+		   ORIENT_OVERRIDE_FILE);
+#endif
+}
+
+/* Returns true if an override file supplied a value. */
+static bool orientation_load(void)
+{
+	FILE *file = fopen(ORIENT_OVERRIDE_FILE, "rb");
+	char line[128];
+	bool found = false;
+
+	if (!file)
+		return false;
+	while (fgets(line, sizeof(line), file)) {
+		char *name = line;
+		char *value;
+
+		while (*name == ' ' || *name == '\t')
+			name++;
+		if (*name == ';' || *name == '#' || *name == '\n' ||
+		    *name == '\0')
+			continue;
+		value = strchr(name, '=');
+		if (!value)
+			continue;
+		*value++ = '\0';
+		/* Trim the key. */
+		{
+			char *end = name + strlen(name);
+
+			while (end > name && (end[-1] == ' ' ||
+					      end[-1] == '\t'))
+				*--end = '\0';
+		}
+		if (strcmp(name, "orientation"))
+			continue;
+		orientation = (int)strtol(value, NULL, 0) &
+			      ORIENT_ROT_180;
+		found = true;
+	}
+	fclose(file);
+	return found;
+}
+
 static void panel_blit(Display *display)
 {
 	if (!display->framebuffer)
@@ -1121,7 +1194,23 @@ static void panel_blit(Display *display)
 	if (hw.rotated_panel) {
 		if (!display->rotate_buffer)
 			return;
-		rotate_surface((const uint16_t *)display->framebuffer,
+		/*
+		 * A rotated panel is transposed on the way out, but the
+		 * orientation correction is a separate axis: it is a property
+		 * of how the panel is mounted, not of its memory layout.
+		 * Applying it here as well is what stops the D-pad from
+		 * appearing to do nothing on a unit whose panel is rotated.
+		 */
+		if (!display->flip_buffer)
+			return;
+		transform_surface((const uint16_t *)display->framebuffer,
+				  display->flip_buffer, orientation);
+		if (orientation_marker || orientation_notice_open())
+			draw_orientation_marker(display->flip_buffer,
+						orientation);
+		if (orientation_notice_open())
+			draw_orientation_digit(display->flip_buffer);
+		rotate_surface((const uint16_t *)display->flip_buffer,
 			       display->rotate_buffer);
 		lcd_blit(display->rotate_buffer, hw.panel_format);
 		return;
@@ -1129,9 +1218,11 @@ static void panel_blit(Display *display)
 	if (display->flip_buffer) {
 		transform_surface((const uint16_t *)display->framebuffer,
 				  display->flip_buffer, orientation);
-		if (orientation_marker)
+		if (orientation_marker || orientation_notice_open())
 			draw_orientation_marker(display->flip_buffer,
 						orientation);
+		if (orientation_notice_open())
+			draw_orientation_digit(display->flip_buffer);
 		if (fn_mode)
 			draw_fn_indicator(display->flip_buffer);
 		draw_status_overlay(display->flip_buffer);
@@ -1271,12 +1362,21 @@ static void poll_keys(PC *pc)
 	bool fn;
 	unsigned int index;
 
-#ifdef WINSPIRE_PROFILE_DEBUG
 	/*
-	 * The D-pad centre button is otherwise unused, so in the DEBUG
-	 * profile it cycles the orientation live. Reinstalling a binary per
-	 * guess is the loop this exists to break: with the value on screen,
-	 * one photo settles which setting the unit needs.
+	 * The D-pad centre button is otherwise unused, so it cycles the panel
+	 * orientation live.
+	 *
+	 * This is not a debug affordance and it is deliberately built into
+	 * every profile. Which of the four corrections a unit needs is a
+	 * property of how its LCD is mounted: it is not readable from the
+	 * Ndless API, and four releases have now shipped a value guessed from
+	 * a development machine that turned out to be wrong on real hardware.
+	 * Putting the choice on the keypad and showing it on screen settles
+	 * it in one press, and the value is written to disk so the observation
+	 * is reused instead of re-guessed.
+	 *
+	 * The digit in the corner names the setting; the corner brackets
+	 * identify which way is up. Together they need no legend.
 	 */
 	{
 		static bool click_was;
@@ -1284,15 +1384,24 @@ static void poll_keys(PC *pc)
 		bool click = isKeyPressed(KEY_NSPIRE_CLICK);
 
 		if (click && !click_was) {
-			orientation = (orientation + 1) & ORIENT_ROT_180;
-			/* mode_changed forces the next present to redraw. */
+			orientation = orient_next(orientation);
+			/*
+			 * mode_changed forces the next present to redraw, and
+			 * the notice window keeps the overlays up long enough
+			 * to see and photograph them.
+			 */
 			mode_changed = true;
+			orientation_notice_until = host_millis() +
+						   ORIENT_NOTICE_MS;
+			orientation_save();
+#if defined(WINSPIRE_PROFILE_DEBUG)
+			/* Only the DEBUG profile writes a trace file. */
 			nspire_log("orientation set to %d by D-pad\n",
 				   orientation);
+#endif
 		}
 		click_was = click;
 	}
-#endif
 	fn = fn_mode_active();
 	/*
 	 * Switching layers has to release whatever the other layer was
@@ -1553,6 +1662,18 @@ int main(int argc, char **argv)
 		return startup_error(&config, boot_error);
 	}
 	guest_hz = config.clock_hz;
+	/*
+	 * A value the owner of the hardware has actually looked at and
+	 * confirmed on the screen outranks the INI default. It is written by
+	 * the D-pad handler, so re-editing winspire.ini.tns cannot silently
+	 * undo an observation made on the unit itself.
+	 */
+	if (orientation_load()) {
+#if defined(WINSPIRE_PROFILE_DEBUG)
+		nspire_log("orientation=%d from %s\n", orientation,
+			   ORIENT_OVERRIDE_FILE);
+#endif
+	}
 #if defined(WINSPIRE_PROFILE_DEBUG)
 	/*
 	 * Record what the panel and the configuration actually resolved to.
@@ -1638,21 +1759,23 @@ int main(int argc, char **argv)
 			display.framebuffer = NULL;
 			return startup_error(&config, boot_error);
 		}
-	} else {
-		/*
-		 * A non-rotated panel needs the `orientation` correction
-		 * applied, so every present needs a transformed copy.
-		 * See transform_surface().
-		 */
-		display.flip_buffer = calloc(1, ROTATE_BUFFER_BYTES);
-		if (!display.flip_buffer) {
-			snprintf(boot_error, sizeof(boot_error),
-				 "Not enough free RAM for the panel rotation buffer.\n"
-				 "Lower mem_size in %s.", config_path);
-			free(display.framebuffer);
-			display.framebuffer = NULL;
-			return startup_error(&config, boot_error);
-		}
+	}
+	/*
+	 * The `orientation` correction needs a staging buffer on every panel:
+	 * it is a property of the mount, not of the memory layout, so a
+	 * rotated panel gets it applied before the transpose as well. See
+	 * transform_surface().
+	 */
+	display.flip_buffer = calloc(1, ROTATE_BUFFER_BYTES);
+	if (!display.flip_buffer) {
+		snprintf(boot_error, sizeof(boot_error),
+			 "Not enough free RAM for the panel rotation buffer.\n"
+			 "Lower mem_size in %s.", config_path);
+		free(display.rotate_buffer);
+		display.rotate_buffer = NULL;
+		free(display.framebuffer);
+		display.framebuffer = NULL;
+		return startup_error(&config, boot_error);
 	}
 	reset_guest_timer();
 	pc = pc_new(redraw, &display, display.framebuffer, &config);
@@ -1684,6 +1807,14 @@ int main(int argc, char **argv)
 		if ((loops & (video_poll_loops - 1)) == 0) {
 			pc_vga_step(pc);
 			flush_redraw(&display);
+			/*
+			 * The orientation overlays are not part of the guest
+			 * screen, so one full redraw has to wipe them once the
+			 * notice window closes.
+			 */
+			if (display.ready &&
+			    orientation_notice_expired())
+				draw_frame(&display, false);
 			if (display.ready)
 				keep_lcd(&display);
 		}

@@ -91,5 +91,13 @@ done
 	-o "$work/obj/input_selftest.o"
 objects+=("$work/obj/input_selftest.o")
 
+# Same arrangement for the orientation self test. It compiles
+# source/winspire-ndless/orientation.h - the header the calculator frontend
+# itself includes - so the transform under test is the one that ships rather
+# than a transcription of it.
+"$cc" "${common_flags[@]}" -I"$repo/source/winspire-ndless" -c "$repo/source/host/orientation_selftest.c" \
+	-o "$work/obj/orientation_selftest.o"
+objects+=("$work/obj/orientation_selftest.o")
+
 "$cc" "${objects[@]}" -o "$out/winspire-host" -Wl,--gc-sections -lm
 echo "built $out/winspire-host"

@@ -41,6 +41,7 @@
 #include "ini.h"
 #include "cxlink.h"
 #include "input_selftest.h"
+#include "orientation_selftest.h"
 #include "bridge_net.h"
 
 #ifndef BPP
@@ -485,6 +486,7 @@ typedef struct {
 	uint64_t target_instructions;	/* 0 = run until done or timeout */
 	uint64_t wall_limit_ns;
 	bool have_media;
+	bool dump_screen;
 	bool quiet;
 	bool trace_phases;
 } BenchOptions;
@@ -514,6 +516,15 @@ static int run_selftest(void)
 	}
 	printf("input self test: PASS (F1-F15 via the Fn chord, Ctrl/Alt, "
 	       "no stuck keys)\n");
+	if (!orientation_selftest()) {
+		fprintf(stderr,
+			"orientation self test: FAIL at "
+			"orientation_selftest.c:%d\n",
+			orientation_selftest_failure_line);
+		return 1;
+	}
+	printf("orientation self test: PASS (transform, marker, digit, "
+	       "partial updates)\n");
 	if (!cxlink_selftest()) {
 		fprintf(stderr, "cxlink self test: FAIL at cxlink.c:%d\n",
 			cxlink_selftest_failure_line);
@@ -559,6 +570,39 @@ static double ns_to_seconds(uint64_t ns)
 static uint16_t phase_word(PC *pc)
 {
 	return *(volatile uint16_t *)(pc->phys_mem + PHASE_WORD_ADDR);
+}
+
+static void dump_text_screen(PC *pc);
+
+/*
+ * Print the emulated VGA text screen straight out of the emulated card.
+ *
+ * This is the only direct evidence of what the BIOS and the boot loader
+ * actually displayed: the harness has no panel, so anything about the
+ * calculator's physical orientation is invisible here - but "did SeaBIOS reach
+ * its POST screen, and does the text read correctly" is not, and that is what
+ * this answers.
+ */
+static void dump_text_screen(PC *pc)
+{
+	static char text[64 * 256];
+	int rows = 0;
+	int cols = 0;
+	uint32_t signature = 0;
+	int got;
+	int r;
+
+	got = vga_get_text_snapshot(pc->vga, text, 64, 256, &rows, &cols,
+				   &signature);
+	if (!got) {
+		printf("\n== VGA text screen ==\n");
+		printf("(not in a text mode at the end of the run)\n");
+		return;
+	}
+	printf("\n== VGA text screen (%dx%d, signature %08x) ==\n",
+	       cols, rows, signature);
+	for (r = 0; r < rows; r++)
+		printf("|%.*s|\n", cols, text + r * cols);
 }
 
 static int run_benchmark(PC *pc, HostDisplay *display, const BenchOptions *opts)
@@ -848,6 +892,8 @@ int main(int argc, char **argv)
 			opts.quiet = true;
 		} else if (!strcmp(argv[i], "--trace-phases")) {
 			opts.trace_phases = true;
+		} else if (!strcmp(argv[i], "--screen")) {
+			opts.dump_screen = true;
 		} else if (!strcmp(argv[i], "--selftest")) {
 			/* Runs standalone: no PC, no BIOS, no media. */
 			return run_selftest();
@@ -912,6 +958,9 @@ int main(int argc, char **argv)
 		 */
 		*(volatile uint16_t *)(pc->phys_mem + PHASE_WORD_ADDR) = 0xFFFF;
 	}
+
+	if (opts.dump_screen)
+		dump_text_screen(pc);
 
 	{
 		int result = run_benchmark(pc, &display, &opts);

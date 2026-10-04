@@ -94,5 +94,7 @@ static const t_key KEY_NSPIRE_DEL = KEY_(0x14, 0x004);
 static const t_key KEY_NSPIRE_MULTIPLY = KEYTPAD_(0x16, 0x002, 0x18, 0x100);
 static const t_key KEY_NSPIRE_APOSTROPHE = KEY_(0x1A, 0x001);
 static const t_key KEY_NSPIRE_MENU = KEY_(0x1C, 0x020);
+static const t_key KEY_NSPIRE_CLICK =
+	KEYTPAD_ARROW_(0x1C, 0x002, TPAD_ARROW_CLICK);
 
 #endif /* WINSPIRE_NDLESS_STUB_KEYS_H */

@@ -114,27 +114,34 @@ fixed 2.6 s timer wait. The rendered SeaBIOS POST screen and its snapshot
 signature are byte-identical before and after; all three profiles build
 warning-free and `check_cx_frontend.sh` is clean.
 
-### 4b. Display orientation — **now a setting**, correctness **verified**, value **still unread on hardware**
+### 4b. Display orientation — **set on the calculator**, correctness **verified** on the host
 
-The panel correction is no longer compiled in. It is read from `winspire.ini`:
+The panel correction is not compiled in and is not something a release has to
+get right. While WiNspire is running, the **D-pad centre button** cycles it
+0 -> 1 -> 2 -> 3 -> 0. A digit in the top-left corner names the live value and
+white brackets mark the four corners, so the value can be read off a
+photograph and the setting that makes the screen upright can simply be *seen*
+rather than reasoned about. Five seconds after the last press the overlays
+wipe themselves off, and the value chosen is written to `winspire.orient.tns`
+and used in preference to `orientation` in `winspire.ini.tns` from then on.
+
+The shipped default is now **0 (identity)**, which is the physically correct
+value for a stock CX: `lcd_blit()` presents the 320x240 surface in panel scan
+order, so the guest framebuffer is handed over unchanged. Every non-zero
+default this port has shipped was a guess about how the panel is mounted.
 
     [nspire]
-    orientation = 3      ; 0 none, 1 flip top-bottom, 2 flip left-right, 3 rotate 180
-    orientation_marker = 1
-
-`orientation_marker = 1` draws white brackets in the four corners with four
-different pairs of leg lengths, so **one photograph identifies which corner is
-which** and therefore exactly which setting the unit needs. Turn it off
-afterwards; it is an overlay, not part of the guest screen.
+    orientation = 0      ; 0 none, 1 flip top-bottom, 2 flip left-right, 3 rotate 180
+    ;orientation_marker = 0
 
 #### Why this stopped being a constant
 
-Four releases have now shipped a different orientation guess, and the fifth
-guess cannot be made from here either: no calculator is available, and the
-reports available in this workspace do not unambiguously separate the four
-possibilities. Guessing again would be the same mistake a fifth time. The
+Five releases have now shipped a different orientation value, and every one of
+them was decided by reasoning on a machine with no calculator attached. The
 property that determines the answer is cheap to measure on hardware and
-impossible to deduce from the Ndless API, so it is now measured.
+impossible to deduce from the Ndless API, so it is now measured: the choice is
+made on the unit and persisted, rather than baked into a binary that has to be
+rebuilt and reinstalled to change its mind.
 
 The evidence that did *not* survive scrutiny is worth recording. v1.0.2
 inferred a bottom-up scan order from the TI-Nspire OS's bottom-left drawing
@@ -153,30 +160,49 @@ which is the one place this code can fix.
 
 #### Verified here
 
-`transform_surface()` and the `draw_region()` staging loop are the same code
-for all four settings, so the invariant that matters is that **the partial
-update path agrees with the full-frame blit** for every setting - if they
-disagree the screen tears into a mixture of orientations and freezes stale
-pixels, which is the v1.0.3 defect. An index-level harness establishes the
-full-frame result and then asserts, pixel by pixel, that nine partial-update
-bands leave exactly that result: **4 settings x 9 bands, 0 wrong pixels**.
+The transform, the corner brackets and the value digit live in
+`source/winspire-ndless/orientation.h`, which the calculator frontend includes
+**and** `source/host/orientation_selftest.c` compiles. That is deliberate: a
+transcribed copy of the transform would keep passing while the shipping code
+changed underneath it, which is the precise failure mode this setting has
+already produced four times - a plausible, wrong, compiled-in correction. A gap
+in the Ndless stub (`KEY_NSPIRE_CLICK` was missing, so the harness could not
+type-check the D-pad handler at all) was filled from the SDK's own `keys.h`
+while doing this.
 
-The harness has teeth: reintroducing the v1.0.3 copy-direction bug makes it
-**segfault**, the same out-of-bounds write that shipped as a real defect in
-v1.0.2. It also caught two out-of-range bands while being written, which is
-why `draw_region()` now clips its rectangle itself instead of trusting the
-caller - every branch below computes panel coordinates by reflecting the guest
-rectangle, so an unclipped one writes outside both the staging buffer and the
-panel.
+`make selftest` now runs **100 orientation checks**, and they assert:
 
-Also verified: type-check clean on all three profiles; all three `.tns` build
-warning-free (337076 / 363964 / 383260 bytes) and pass `genzehn`; `make
-selftest` PASS; the benchmark still completes, exit 0, 26 redraw regions,
-`vga step` 16.6% of wall.
+- identity is a byte-exact copy, and each of the four settings matches a
+  longhand reference mapping written independently of the header;
+- every setting is its own inverse, which is what makes cycling with the D-pad
+  terminate on a correct answer rather than on a symmetric one;
+- no two settings render an asymmetric test pattern identically, so **exactly
+  one** of the four can look right;
+- the corner brackets put a bracket in all four corners, all four are
+  distinguishable, and none lands away from a corner;
+- the value digit stays inside its own box and the four digits differ - the
+  first version of this check compared whole surfaces and passed a duplicate
+  glyph, because the guest content underneath already differed between
+  settings; it now compares against a flat background;
+- the `draw_region()` partial-update loop agrees pixel for pixel with the
+  full-frame transform, for **4 settings x 9 bands** - if they disagree the
+  screen tears into a mixture of orientations, which is the v1.0.3 defect.
 
-**Still open, and only the owner of the hardware can close it:** which of the
-four values this particular CX needs. It is one edit to one line in
-`winspire.ini` and no rebuild - deliberately.
+Three deliberate mutations were applied and reverted, each failing at the
+check meant to catch it: a flipped vertical axis (41 failures), a D-pad cycle
+that skips a setting, and a duplicated digit glyph. A fourth - drawing the
+brackets without reflecting them - is *not* claimed as caught: it changes which
+corner each bracket sits in but leaves all four present and distinguishable,
+so it is an equivalent presentation rather than a defect.
+
+The same run reports: `orientation self test: PASS`, `input self test: PASS`
+(42 checks), `cxlink self test: PASS`, `bridge_net self test: PASS`. Type-check
+clean on all three profiles, and the benchmark is unchanged at 80.11 Msteps/s
+with 26 redraw regions.
+
+**Still unverified, and only the owner of the hardware can close it:** that
+the D-pad cycle and the overlays behave as intended on a real CX. The code is
+type-checked and the transform is tested, but no calculator has run it.
 
 ### 5. cxlink protocol, Nspire-side bridge, and the guest DHCP server —
 **typechecked**, with an **executable self test** for both

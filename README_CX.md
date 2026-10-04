@@ -250,17 +250,32 @@ of the chord first will not make it also type the underlying character.
 
 F13–F15 are `E0`-prefixed scancodes, exactly as on a PC.
 
-### Debug-only orientation controls
+### Panel orientation — set it on the calculator
 
-`nspire95-cx-debug.tns` additionally:
+Which way the guest screen needs turning depends on how your particular CX's
+LCD is mounted, and that is not something the software can read. So it is not
+baked into the binary: **press the D-pad centre button and it cycles
+0 → 1 → 2 → 3 → 0.** Stop when Windows is the right way up.
 
-- cycles the panel orientation each time you press the **D-pad centre button**,
-  and draws the active setting as bars in the top-left corner (bar 1 = flip
-  top-bottom, bar 2 = flip left-right);
-- records `lcd_type()` and the resolved orientation in `winspire.log.tns`.
+Two things appear while you are choosing, and both disappear by themselves
+about five seconds after the last press:
 
-Use the debug build to settle the panel orientation in one boot — see
-[Troubleshooting](#7-troubleshooting) — and the release build afterwards.
+- a **digit** (0, 1, 2 or 3) in the top-left corner saying which value is live;
+- **white brackets in the four corners**, with a different pair of leg lengths
+  in each, so a photograph shows which way is up.
+
+The value you settle on is saved to `winspire.orient.tns` next to the program
+and is used from then on, in preference to `orientation` in `winspire.ini.tns`.
+Delete that file to go back to whatever the INI says. Nothing needs rebuilding
+or reinstalling to change it.
+
+The default is `0` — no correction — which is correct for a stock CX.
+
+### Debug-only extras
+
+`nspire95-cx-debug.tns` additionally records `lcd_type()` and the resolved
+orientation in `winspire.log.tns`, next to the `.tns` in the same folder. That
+is the file to send if you need to report what a unit actually resolved.
 
 ### Touchpad and mouse
 
@@ -361,7 +376,7 @@ rather than waiting forever for a block interrupt that would never arrive.
 | "Invalid INI entry at line N" | Syntax error in the INI. Section and key names are case-sensitive. |
 | "Not enough free RAM ..." | Lower `mem_size` in the INI. |
 | Display is rotated sideways on a CX II / rev W+ panel | Rebuild with `-DWINSPIRE_PANEL_ROTATE_CCW` (or without it, to flip back). The panel mount direction varies by hardware revision and cannot be detected at runtime. This only chooses a rotation direction; it cannot correct a mirror. |
-| Display is mirrored, rotated or upside down | Set `orientation` under `[nspire]` in `winspire.ini` to `0` (none), `1` (flip top-bottom), `2` (flip left-right) or `3` (rotate 180, the default). To find the right value, set `orientation_marker = 1`: white brackets appear in the four corners with four different pairs of leg lengths, so one photo says which corner is which. Then set it back to 0. No rebuild needed. |
+| Display is mirrored, rotated or upside down | Press the **D-pad centre button** while WiNspire is running: the orientation cycles 0 (none), 1 (flip top-bottom), 2 (flip left-right), 3 (rotate 180). A digit in the top-left corner shows which value is live and white brackets mark the corners. Stop when the screen is upright; the overlays vanish on their own after about five seconds and the value is saved. The same thing can be set by hand as `orientation` under `[nspire]` in `winspire.ini`, but a saved `winspire.orient.tns` takes precedence over that. No rebuild needed. |
 | Screen goes black after launching | Press a key to exit, then run the `DEBUG` profile and check the message box; DEBUG traces far more. |
 | Guest never reaches the desktop | Check the image boots on a desktop emulator first. Windows 95 needs a matching IDE controller and `fill_cmos = 1`. |
 | Very slow | Expected on the original CX. Try TURBO, raise `clock_hz` only if the guest complains about timers, and see PERFORMANCE.md for where the time actually goes. |

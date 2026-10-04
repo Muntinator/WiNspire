@@ -45,17 +45,20 @@ Consequences for this port, all implemented in `source/winspire-ndless/main.c`:
 - **ASSUMPTION:** the rotation direction for a 240x320 panel. It varies by
   mount and cannot be read from the Ndless API. `WINSPIRE_PANEL_ROTATE_CCW`
   selects it and must be set empirically on hardware. This is a rotation
-  choice only.
-- **MEASURED PER UNIT, NOT ASSUMED:** the orientation correction applied on the
-  non-rotated path. It is read from `winspire.ini` under `[nspire]` as
-  `orientation` (0 none, 1 flip top-bottom, 2 flip left-to-right, 3 rotate
-  180) and defaults to 3. It cannot be derived from the Ndless API, and four
-  releases of guessing at it went wrong, so it is set per unit instead. Set
-  `orientation_marker = 1` and one photograph of the corner brackets
-  identifies the right value; see `CX_PORT_STATUS.md` §4b.
-  `transform_surface()` in `source/winspire-ndless/main.c` implements it. A
-  transposed panel does not use this, which is why it is keyed on
-  `!rotated_panel`.
+  choice only, and it is orthogonal to the correction below.
+- **MEASURED PER UNIT, NOT ASSUMED:** the orientation correction. It cannot be
+  derived from the Ndless API, and five releases of guessing at it went wrong,
+  so it is chosen on the calculator itself: the D-pad centre button cycles
+  0 (none), 1 (flip top-bottom), 2 (flip left-right), 3 (rotate 180), a digit
+  in the top-left corner names the live value, and the value is saved to
+  `winspire.orient.tns`. The default is **0**, which is correct for a stock CX
+  because `lcd_blit()` presents the surface in panel scan order. It can still
+  be set by hand as `orientation` under `[nspire]` in `winspire.ini`, and
+  `orientation_marker = 1` keeps the corner brackets up permanently. See
+  `CX_PORT_STATUS.md` §4b.
+  `orient_transform()` in `source/winspire-ndless/orientation.h` implements it,
+  and it is applied on the rotated path too - mount direction and panel memory
+  layout are separate axes, so a transposed panel still needs this.
 - Note that the TI-Nspire OS's bottom-left drawing origin is **not** evidence
   about fill order: it describes how the OS issues drawing commands, not the
   order in which `lcd_blit()` writes panel memory. An earlier version inferred
