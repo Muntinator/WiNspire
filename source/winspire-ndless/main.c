@@ -985,8 +985,8 @@ static void restore_os_cursor(uint32_t saved_cursor)
  * WINSPIRE_PANEL_ROTATE_CCW selects which way that transposition runs, for
  * units whose panel is mounted the other way round. It is a mount-direction
  * choice only; it cannot correct a mirror, because a mirror is not a
- * rotation. The 180-degree correction the original CX needs is handled by
- * rotate_surface_180() below.
+ * rotation. The correction a non-rotated panel needs is applied by
+ * transform_surface() below, driven by the `orientation` setting.
  */
 static void rotate_surface(const uint16_t *src, uint16_t *dst)
 {
@@ -1519,9 +1519,9 @@ int main(int argc, char **argv)
 		}
 	} else {
 		/*
-		 * The panel presents the surface rotated 180 degrees, so
-		 * every present needs a corrected copy.
-		 * See rotate_surface_180().
+		 * A non-rotated panel needs the `orientation` correction
+		 * applied, so every present needs a transformed copy.
+		 * See transform_surface().
 		 */
 		display.flip_buffer = calloc(1, ROTATE_BUFFER_BYTES);
 		if (!display.flip_buffer) {
