@@ -20,9 +20,14 @@ runs its own drivers and its own TCP/IP stack.
 | To build | To run |
 |---|---|
 | The [Ndless SDK](https://github.com/ndless-nspire/Ndless) (`nspire-gcc`, `nspire-ld`, `genzehn`, `make-prg`) plus an ARM cross compiler — `source/build-scripts/setup_ndless_sdk.sh` assembles the whole toolchain in one step | A TI-Nspire **CX** or **CX CAS** |
-| Bash | Ndless 4.x installed |
+| Bash | Ndless r2020 for CX OS 4.5.5.79 (or a compatible later CX Ndless release) |
 | ~200 MB disk | A legally obtained Windows 95 disk image |
 | | (optional) an ESP32 for audio and networking (firmware in `source/esp32/`) |
+
+For the original CX on OS 4.5.5.79, use [Ndless r2020](https://github.com/ndless-nspire/Ndless/releases/tag/r2020) (the OS version and Ndless release number are different). Its release notes specifically mention a fix for stuck white pixels in LCD compatibility mode; if the installed Ndless is older, update it before treating a white screen as an app orientation issue.
+WiNspire requires the Ndless LCD API revision 2004 (`lcd_init`/`lcd_blit`) and
+queries `lcd_type()` at runtime. CX panels from hardware revision W onward use
+the 240x320 layout; other CX color panels use 320x240.
 
 A grayscale Clickpad/Touchpad cannot run this: its PL110 panel is 4bpp gray and
 cannot display the 16bpp guest surface.
@@ -269,7 +274,7 @@ and is used from then on, in preference to `orientation` in `winspire.ini.tns`.
 Delete that file to go back to whatever the INI says. Nothing needs rebuilding
 or reinstalling to change it.
 
-The default is `0` — no correction — which is correct for a stock CX.
+The default is `0` — no software correction. Hardware revision Z alone does not establish a different pixel transform.
 
 ### Debug-only extras
 
@@ -375,7 +380,8 @@ rather than waiting forever for a block interrupt that would never arrive.
 | Message box about a missing file | A path in `winspire.ini.tns` is wrong, or the file is not in the same folder as `nspire95-cx.tns`. |
 | "Invalid INI entry at line N" | Syntax error in the INI. Section and key names are case-sensitive. |
 | "Not enough free RAM ..." | Lower `mem_size` in the INI. |
-| Display is rotated sideways on a CX II / rev W+ panel | Rebuild with `-DWINSPIRE_PANEL_ROTATE_CCW` (or without it, to flip back). The panel mount direction varies by hardware revision and cannot be detected at runtime. This only chooses a rotation direction; it cannot correct a mirror. |
+| Screen direction is wrong | The default is identity; the hardware-reported LCD type is handled by the frontend. If the image is visible but oriented incorrectly, use the D-pad centre button to cycle orientation. This does not diagnose an all-white screen. |
+| Screen is entirely white or pixels stay white | Confirm the calculator is running OS 4.5.5.79 with Ndless r2020, whose release notes include an LCD compatibility-mode stuck-white-pixel fix. Orientation settings are not a remedy for a blank white display. |
 | Display is mirrored, rotated or upside down | Press the **D-pad centre button** while WiNspire is running: the orientation cycles 0 (none), 1 (flip top-bottom), 2 (flip left-right), 3 (rotate 180). A digit in the top-left corner shows which value is live and white brackets mark the corners. Stop when the screen is upright; the overlays vanish on their own after about five seconds and the value is saved. The same thing can be set by hand as `orientation` under `[nspire]` in `winspire.ini`, but a saved `winspire.orient.tns` takes precedence over that. No rebuild needed. |
 | Screen goes black after launching | Press a key to exit, then run the `DEBUG` profile and check the message box; DEBUG traces far more. |
 | Guest never reaches the desktop | Check the image boots on a desktop emulator first. Windows 95 needs a matching IDE controller and `fill_cmos = 1`. |

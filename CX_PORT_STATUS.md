@@ -45,8 +45,13 @@ it is a throughput and panel-API port.
 - The raw CX II cursor register `0xC0000C00` is now touched only when
   `hw.has_hw_cursor` is set, so the original CX never writes it.
 - Grayscale PL110 models are rejected with an accurate message.
-- The CX's supported `set_cpu_speed(CPU_SPEED_150MHZ)` path is used where it
-  works, with the previous value restored at exit.
+- The build targets the Ndless LCD API revision 2004 (`lcd_init`/`lcd_blit`),
+  available on supported Ndless releases including r2020 for CX OS 4.5.5.79.
+  The calculator's OS version and Ndless release number are distinct; this
+  baseline does not infer a revision-Z panel orientation.
+- The original CX `set_cpu_speed(CPU_SPEED_150MHZ)` behavior is unchanged from
+  the pre-regression build, with the previous value restored at exit. Clock
+  changes have not been established as a cause or a remedy for the white screen.
 
 ### 3. Ndless API type-check harness — **verified**
 
@@ -114,21 +119,21 @@ fixed 2.6 s timer wait. The rendered SeaBIOS POST screen and its snapshot
 signature are byte-identical before and after; all three profiles build
 warning-free and `check_cx_frontend.sh` is clean.
 
-### 4b. Display orientation — **set on the calculator**, correctness **verified** on the host
+### 4b. Display orientation — transform tested on host; device direction unverified
 
-The panel correction is not compiled in and is not something a release has to
-get right. While WiNspire is running, the **D-pad centre button** cycles it
-0 -> 1 -> 2 -> 3 -> 0. A digit in the top-left corner names the live value and
-white brackets mark the four corners, so the value can be read off a
-photograph and the setting that makes the screen upright can simply be *seen*
-rather than reasoned about. Five seconds after the last press the overlays
-wipe themselves off, and the value chosen is written to `winspire.orient.tns`
-and used in preference to `orientation` in `winspire.ini.tns` from then on.
+The **D-pad centre button** cycles the correction live (0 -> 1 -> 2 -> 3 ->
+0). A digit in the top-left corner names the live value and white brackets mark
+the four corners. Five seconds after the last press the overlays disappear and
+the selected value is saved to `winspire.orient.tns`, which takes precedence
+over the INI setting on later launches.
 
-The shipped default is now **0 (identity)**, which is the physically correct
-value for a stock CX: `lcd_blit()` presents the 320x240 surface in panel scan
-order, so the guest framebuffer is handed over unchanged. Every non-zero
-default this port has shipped was a guess about how the panel is mounted.
+The shipped default is **0 (identity)**. The revision-Z hardware label and the
+reported inverted image do not establish the physical panel scan direction;
+Ndless `lcd_type()` distinguishes the 320x240 and 240x320 layouts, but not the
+orientation correction needed for an individual unit. This default therefore
+makes no unsupported transform assumption. The transform is host-tested, but
+the calculator LCD path and the resolution of the reported white-screen failure
+remain unverified on physical hardware.
 
     [nspire]
     orientation = 0      ; 0 none, 1 flip top-bottom, 2 flip left-right, 3 rotate 180
@@ -136,12 +141,10 @@ default this port has shipped was a guess about how the panel is mounted.
 
 #### Why this stopped being a constant
 
-Five releases have now shipped a different orientation value, and every one of
-them was decided by reasoning on a machine with no calculator attached. The
-property that determines the answer is cheap to measure on hardware and
-impossible to deduce from the Ndless API, so it is now measured: the choice is
-made on the unit and persisted, rather than baked into a binary that has to be
-rebuilt and reinstalled to change its mind.
+Orientation is a presentation choice that can be changed on the calculator
+without rebuilding. Revision labels and panel geometry do not tell us the
+required correction, so the default remains identity and users can select a
+correction live using the D-pad controls.
 
 The evidence that did *not* survive scrutiny is worth recording. v1.0.2
 inferred a bottom-up scan order from the TI-Nspire OS's bottom-left drawing
@@ -170,7 +173,7 @@ in the Ndless stub (`KEY_NSPIRE_CLICK` was missing, so the harness could not
 type-check the D-pad handler at all) was filled from the SDK's own `keys.h`
 while doing this.
 
-`make selftest` now runs **100 orientation checks**, and they assert:
+`make selftest` now runs **101 orientation checks**, and they assert:
 
 - identity is a byte-exact copy, and each of the four settings matches a
   longhand reference mapping written independently of the header;
@@ -195,10 +198,12 @@ brackets without reflecting them - is *not* claimed as caught: it changes which
 corner each bracket sits in but leaves all four present and distinguishable,
 so it is an equivalent presentation rather than a defect.
 
-The same run reports: `orientation self test: PASS`, `input self test: PASS`
-(42 checks), `cxlink self test: PASS`, `bridge_net self test: PASS`. Type-check
-clean on all three profiles, and the benchmark is unchanged at 80.11 Msteps/s
-with 26 redraw regions.
+After restoring identity as the default, the final `make selftest` run passed:
+101 orientation checks, 42 input checks, `cxlink self test: PASS`, and
+`bridge_net self test: PASS`. `check_cx_frontend.sh` also passed for DEBUG,
+RELEASE and TURBO (18 translation units per profile), and the TURBO calculator
+package rebuilt cleanly as `build/CX/nspire95-cx.tns` (387060 bytes). These host
+checks do not exercise the calculator LCD hardware.
 
 **Still unverified, and only the owner of the hardware can close it:** that
 the D-pad cycle and the overlays behave as intended on a real CX. The code is

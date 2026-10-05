@@ -39,24 +39,23 @@ clock_hz = 4770000
 
 ; Panel orientation, for the calculator target only (ignored elsewhere).
 ;
-; Which correction a unit needs depends on how its LCD is mounted, and that is
-; not readable through the Ndless API. It is a setting here rather than a
-; constant compiled into the binary because getting it wrong by reasoning has
-; cost several releases; it should be read off the screen instead.
+; Start at 0 (no transform). Hardware revision and LCD type do not establish
+; which direction a particular unit's panel should be corrected. If needed,
+; choose the correction live on-device with the D-pad centre button.
 ;
-;   0  leave the guest surface alone   (the default)
+;   0  leave the guest surface alone
 ;   1  flip top-to-bottom
 ;   2  flip left-to-right
 ;   3  rotate 180 degrees
 ;
-; You do not have to edit this file. Press the D-pad centre button while
-; WiNspire is running and the setting cycles 0 -> 1 -> 2 -> 3 -> 0. A digit
+; A saved winspire.orient.tns setting has priority. Delete that file to use
+; this INI default. Press the D-pad centre button while WiNspire is running
+; to cycle 0 -> 1 -> 2 -> 3 -> 0. A digit
 ; in the top-left corner shows which value is live and white brackets mark
 ; the four corners, so you can see the screen become upright and photograph
 ; the moment it is right. Five seconds later the overlays go away by
-; themselves. The value you settle on is written to winspire.orient.tns and
-; takes precedence over the line below; delete that file to go back to using
-; this one.
+; themselves. The selected value is saved in winspire.orient.tns and
+; takes precedence over this INI setting.
 ;
 ; Set orientation_marker = 1 to keep the corner brackets on permanently.
 ;

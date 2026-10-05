@@ -231,6 +231,9 @@ bool orientation_selftest(void)
 		return false;
 	}
 
+	CHECK(ORIENT_DEFAULT == ORIENT_IDENTITY,
+	      "unknown panel orientation must default to no correction");
+
 	/* Identity is an exact copy: lcd_blit() expects the surface as-is. */
 	orient_transform(pattern, full, W, H, ORIENT_IDENTITY);
 	CHECK(memcmp(pattern, full, PIXELS * sizeof(uint16_t)) == 0,

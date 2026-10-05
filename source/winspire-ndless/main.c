@@ -84,15 +84,6 @@
  */
 #include "orientation.h"
 
-/*
- * Identity is the default, and it is the physically correct value for a stock
- * CX: lcd_blit() presents the 320x240 surface in panel scan order, so the
- * guest framebuffer has to be handed over unchanged. Every non-zero default
- * this port has shipped was a guess about how the panel is mounted, and those
- * guesses were wrong on real hardware. The correction is now chosen on the
- * calculator with the D-pad and written to disk.
- */
-#define ORIENT_DEFAULT ORIENT_IDENTITY
 #define KEY_APOSTROPHE 0x34
 #define KEY_ASTERISK 0x33
 #define KEY_ALT 58
@@ -1612,9 +1603,12 @@ int main(int argc, char **argv)
 	 * The original CX clocks its ARM926 at roughly a third of the CX II rate,
 	 * so available guest throughput is the binding constraint. Ndless exposes
 	 * the clock controller on that hardware (and returns 0 on the CX II, where
-	 * the PMU is programmed instead). Ask for the fastest supported step and
-	 * restore the previous value on exit; leaving the core overclocked after
-	 * returning to TI-OS is not acceptable.
+	 * the PMU is programmed instead).
+	 *
+	 * Preserve the existing CX clock policy for this target. Changing CPU
+	 * speed has not been verified as a remedy for the reported white screen;
+	 * keep the previous clock so display diagnosis is not confounded by a new
+	 * performance setting. Restore the previous value on exit if it changed.
 	 */
 	if (hw.can_set_cpu_speed) {
 		unsigned previous = set_cpu_speed(CPU_SPEED_150MHZ);

@@ -27,6 +27,8 @@
 #define ORIENT_FLIP_V   0x01
 #define ORIENT_FLIP_H   0x02
 #define ORIENT_ROT_180  (ORIENT_FLIP_V | ORIENT_FLIP_H)
+/* No panel direction is assumed: the calculator can select one at runtime. */
+#define ORIENT_DEFAULT ORIENT_IDENTITY
 
 /* Pixel the overlays are drawn in: white on the CX's 16bpp panel. */
 #define ORIENT_OVERLAY_PIXEL 0xFFFF
